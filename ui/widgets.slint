@@ -1,0 +1,327 @@
+// VoxelMotion Studio - Reusable Studio Widgets (Vector Icons, Neon Switches, Axis Badges)
+
+import { Theme } from "theme.slint";
+
+export component PanelCard inherits Rectangle {
+    background: Theme.bg-panel;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.border-subtle;
+    clip: true;
+}
+
+export component VectorIcon inherits Path {
+    in property <color> icon-color: Theme.text-secondary;
+    width: 14px;
+    height: 14px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke: root.icon-color;
+    stroke-width: 2px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+export component NeonToggle inherits TouchArea {
+    in property <bool> checked: false;
+    callback toggled(bool);
+    width: 36px;
+    height: 19px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: 10px;
+        background: root.checked ? @linear-gradient(90deg, #6d28d9, #9333ea) : #232038;
+        border-width: 1px;
+        border-color: root.checked ? #a855f7 : Theme.border-soft;
+        animate background { duration: 140ms; }
+
+        Rectangle {
+            x: root.checked ? parent.width - self.width - 2px : 2px;
+            y: 2px;
+            width: 13px;
+            height: 13px;
+            border-radius: 7px;
+            background: #ffffff;
+            animate x { duration: 140ms; easing: ease-out; }
+        }
+    }
+
+    clicked => { root.toggled(!root.checked); }
+}
+
+export component StudioButton inherits TouchArea {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> primary: false;
+    in property <bool> compact: false;
+    mouse-cursor: pointer;
+    height: root.compact ? 24px : 29px;
+
+    Rectangle {
+        border-radius: 6px;
+        background: root.primary ?
+            @linear-gradient(90deg, #6d28d9, #8b5cf6) :
+            (root.active ? #2d2254 : (root.has-hover ? Theme.bg-hover : Theme.bg-card));
+        border-width: 1px;
+        border-color: root.primary ? #a78bfa : (root.active ? #7c3aed : Theme.border-subtle);
+
+        Text {
+            text: root.label;
+            color: root.primary ? #ffffff : (root.active ? #e9d5ff : Theme.text-primary);
+            font-size: root.compact ? 10.5px : 11.5px;
+            font-weight: root.primary ? 600 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component ToolRailBtn inherits TouchArea {
+    in property <string> path-cmd;
+    in property <bool> filled: false;
+    in property <bool> active: false;
+    width: 30px;
+    height: 30px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        border-radius: 7px;
+        background: root.active ? @linear-gradient(135deg, #6d28d9, #7c3aed) : (root.has-hover ? #241f3d : transparent);
+        border-width: 1px;
+        border-color: root.active ? #a78bfa : transparent;
+
+        Path {
+            width: 15px;
+            height: 15px;
+            x: 7.5px;
+            y: 7.5px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: root.filled ? (root.active ? #ffffff : Theme.text-secondary) : transparent;
+            stroke: root.filled ? transparent : (root.active ? #ffffff : Theme.text-secondary);
+            stroke-width: 2px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            commands: root.path-cmd;
+        }
+    }
+}
+
+export component AxisCell inherits Rectangle {
+    in property <string> axis: "X";
+    in property <color> axis-color: Theme.axis-x;
+    in property <string> value-text: "0.00";
+    callback step(float);
+    callback scrub-start();
+    callback scrub(float);
+    callback reset-axis();
+
+    height: 24px;
+    border-radius: 5px;
+    background: drag-ta.has-hover ? #19162b : Theme.bg-input;
+    border-width: 1px;
+    border-color: drag-ta.has-hover ? #4d3d85 : Theme.border-subtle;
+
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 3px;
+        spacing: 2px;
+        alignment: space-between;
+
+        drag-ta := TouchArea {
+            horizontal-stretch: 1;
+            mouse-cursor: ew-resize;
+            property <bool> dragging: false;
+            property <float> last-x: 0;
+            double-clicked => { root.reset-axis(); }
+            pointer-event(ev) => {
+                let mx = self.mouse-x / 1px;
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                    self.dragging = true;
+                    self.last-x = mx;
+                    root.scrub-start();
+                } else if (ev.kind == PointerEventKind.move && self.dragging) {
+                    let dx = mx - self.last-x;
+                    self.last-x = mx;
+                    if (abs(dx) > 0.01) {
+                        root.scrub(dx);
+                    }
+                } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                    self.dragging = false;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 3px;
+                Text {
+                    text: root.axis;
+                    color: root.axis-color;
+                    font-size: 10px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.value-text;
+                    color: Theme.text-primary;
+                    font-size: 10.5px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        VerticalLayout {
+            width: 11px;
+            alignment: center;
+            spacing: 0px;
+            up-ta := TouchArea {
+                height: 10px;
+                mouse-cursor: pointer;
+                clicked => { root.step(1.0); }
+                Text { text: "▲"; font-size: 6px; color: up-ta.has-hover ? Theme.accent-bright : Theme.text-dim; vertical-alignment: center; horizontal-alignment: center; }
+            }
+            dn-ta := TouchArea {
+                height: 10px;
+                mouse-cursor: pointer;
+                clicked => { root.step(-1.0); }
+                Text { text: "▼"; font-size: 6px; color: dn-ta.has-hover ? Theme.accent-bright : Theme.text-dim; vertical-alignment: center; horizontal-alignment: center; }
+            }
+        }
+    }
+}
+
+export component StudioCheckbox inherits TouchArea {
+    in property <string> label;
+    in property <bool> checked: true;
+    callback toggled(bool);
+    height: 20px;
+    mouse-cursor: pointer;
+
+    HorizontalLayout {
+        spacing: 7px;
+        alignment: start;
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: root.checked ? #7c3aed : Theme.bg-input;
+            border-width: 1px;
+            border-color: root.checked ? #a78bfa : Theme.border-soft;
+            if root.checked : Path {
+                width: 10px; height: 10px; x: 2px; y: 2px;
+                viewbox-width: 24; viewbox-height: 24;
+                fill: transparent;
+                stroke: #ffffff;
+                stroke-width: 3px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                commands: "M5 13 L10 18 L19 7";
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    clicked => { root.toggled(!root.checked); }
+}
+
+// Vector transport control button (immune to missing Windows font glyphs like U+23F8)
+export component TransportIconBtn inherits TouchArea {
+    in property <string> kind: "play"; // "first", "last", "play", "pause"
+    in property <bool> primary: false;
+    width: 28px;
+    height: 22px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        border-radius: 5px;
+        background: root.primary ? (root.has-hover ? #8b5cf6 : Theme.accent)
+                  : (root.has-hover ? Theme.bg-hover : Theme.bg-input);
+        border-width: 1px;
+        border-color: root.primary ? #c4b5fd88 : Theme.border-subtle;
+
+        if root.kind == "play" : Path {
+            width: 11px; height: 11px;
+            x: (parent.width - self.width) / 2 + 1px;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 24; viewbox-height: 24;
+            fill: root.primary ? #ffffff : Theme.text-primary;
+            commands: "M7 5 L19 12 L7 19 Z";
+        }
+        if root.kind == "pause" : Path {
+            width: 11px; height: 11px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 24; viewbox-height: 24;
+            fill: #ffffff;
+            commands: "M6 5 H10 V19 H6 Z M14 5 H18 V19 H14 Z";
+        }
+        if root.kind == "first" : Path {
+            width: 11px; height: 11px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 24; viewbox-height: 24;
+            fill: Theme.text-primary;
+            commands: "M5 5 H8 V19 H5 Z M19 5 L10 12 L19 19 Z";
+        }
+        if root.kind == "last" : Path {
+            width: 11px; height: 11px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            viewbox-width: 24; viewbox-height: 24;
+            fill: Theme.text-primary;
+            commands: "M16 5 H19 V19 H16 Z M5 5 L14 12 L5 19 Z";
+        }
+    }
+}
+
+export component IconPrimaryButton inherits TouchArea {
+    in property <string> label;
+    in property <string> icon-commands: "M12 4 V15 M7 11 L12 16 L17 11 M5 19 H19";
+    height: 28px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        border-radius: 6px;
+        background: root.has-hover ? #8b5cf6 : Theme.accent;
+        border-width: 1px;
+        border-color: #c4b5fd88;
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            Rectangle {
+                width: 13px; height: 13px; y: (parent.height - self.height) / 2;
+                Path {
+                    width: 13px; height: 13px;
+                    viewbox-width: 24; viewbox-height: 24;
+                    fill: transparent;
+                    stroke: #ffffff;
+                    stroke-width: 2.2px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    commands: root.icon-commands;
+                }
+            }
+            Text {
+                text: root.label;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

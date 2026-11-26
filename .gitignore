@@ -1,0 +1,15 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local user project state & generated exports
+/project.json
+/exports/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

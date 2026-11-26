@@ -1,0 +1,28 @@
+#!/bin/sh
+# Conventional Commits & Clean History Guard for VoxelMotion Studio
+
+msg_file="$1"
+[ -f "$msg_file" ] || exit 1
+
+first_line=$(grep -vE '^(#|$)' "$msg_file" | head -n 1 | tr -d '\r')
+
+case "$first_line" in
+  Merge\ *|Revert\ \"*\")
+    ;;
+  *)
+    if ! printf '%s\n' "$first_line" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._-]+\))?!?: .{3,}$'; then
+      echo "ERROR: Commit message must follow Conventional Commits." >&2
+      echo "  Format: <type>(<scope>): <imperative summary>" >&2
+      echo "  Types : feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert" >&2
+      echo "  Found : $first_line" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+if grep -qiE '^(Co-Authored-By|Generated-by|Signed-off-by:.*(AI|GPT|Claude|Gemini|Antigravity)):' "$msg_file"; then
+  echo "ERROR: Attribution / Co-Authored-By trailers are not allowed in commit messages." >&2
+  exit 1
+fi
+
+exit 0

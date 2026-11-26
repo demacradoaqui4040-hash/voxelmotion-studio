@@ -1,0 +1,1599 @@
+// VoxelMotion Studio - Native GPU 3D Voxel Keyframe Animation Studio UI (Slint + wgpu DX12/Vulkan)
+
+import { Theme } from "theme.slint";
+import { PanelCard, VectorIcon, NeonToggle, StudioButton, ToolRailBtn, AxisCell, StudioCheckbox, TransportIconBtn, IconPrimaryButton } from "widgets.slint";
+import { ListView, LineEdit } from "std-widgets.slint";
+
+export struct CategoryEntry {
+    name: string,
+    count: int,
+}
+
+export struct WeaponListItem {
+    index: int,
+    id: string,
+    name: string,
+    mod_name: string,
+    category: string,
+    icon: image,
+}
+
+export struct GalleryItem {
+    id: string,
+    name: string,
+    group: string,
+    thumb: image,
+    active: bool,
+}
+
+export struct TimelineTrack {
+    bone_idx: int,
+    name: string,
+    dot_color: color,
+    active: bool,
+    visible: bool,
+}
+
+export struct TimelineDiamond {
+    kf_idx: int,
+    track_idx: int,
+    frac: float,
+    is_impact: bool,
+    is_selected: bool,
+    dot_color: color,
+}
+
+export component MainWindow inherits Window {
+    title: "VoxelMotion Studio";
+    no-frame: true;
+    preferred-width: 1440px;
+    preferred-height: 890px;
+    min-width: 1180px;
+    min-height: 760px;
+    background: Theme.bg-shell;
+
+    // Navigation & Window Chrome
+    in-out property <int> main-tab: 0; // 0 Animaciones, 1 Biblioteca, 2 Proyecto, 3 Ajustes
+    in-out property <bool> is-maximized: false;
+    callback start-drag();
+    callback win-minimize();
+    callback win-maximize();
+    callback win-close();
+
+    // Weapon Library State
+    in-out property <string> weapon-search: "";
+    in-out property <int> selected-category: 0;
+    in-out property <[CategoryEntry]> categories: [];
+    in-out property <[WeaponListItem]> filtered-weapons: [];
+    in-out property <int> active-weapon-index: 0;
+    in-out property <string> active-weapon-name: "Espada de Acero";
+    in-out property <string> active-weapon-mod: "VoxelMotion";
+    in-out property <string> active-weapon-class: "MEDIUM";
+    in-out property <image> weapon-card-img;
+    in-out property <int> total-weapon-count: 8;
+    callback select-category(int);
+    callback search-weapons(string);
+    callback select-weapon(int);
+    callback cycle-weapon(int);
+    callback import-custom-weapons();
+
+    // Main 3D Viewport State & Interactions
+    in-out property <image> main-viewport;
+    in-out property <string> active-clip-name: "Nueva Acción";
+    in-out property <int> active-tool: 1; // 0 Select, 1 Rotate, 2 Scale, 3 Camera, 4 Move
+    callback select-tool(int);
+    callback toggle-solo-weapon();
+    in-out property <bool> solo-weapon: false;
+    in-out property <bool> vp-expanded: false;
+    in-out property <float> triad-x-dx: 16.0;
+    in-out property <float> triad-x-dy: 4.0;
+    in-out property <float> triad-y-dx: 0.0;
+    in-out property <float> triad-y-dy: -16.0;
+    in-out property <float> triad-z-dx: -13.0;
+    in-out property <float> triad-z-dy: 8.0;
+
+    in-out property <string> status-pill: "BrazoDerecho · Rotar";
+    in-out property <string> kf-badge: "KF 1/4";
+    in-out property <bool> auto-keyframe: true;
+    in-out property <bool> text-input-active: false;
+
+    callback viewport-resized(float, float);
+    callback world-resized(float, float);
+    callback vp-pointer-down(float, float, int, bool, bool, float, float); // x, y, btn, mod_pan, mod_ctrl, w, h
+    callback vp-pointer-hover(float, float, float, float);
+    callback vp-pointer-move(float, float, bool, bool, float, float);
+    callback vp-pointer-up(float, float, bool, float, float);
+    callback vp-wheel(float, float, float, float, float); // mx, my, w, h, dy
+    callback focus-bone();
+    callback reset-camera();
+    callback set-camera-preset(int); // 0=3/4, 1=Front, 2=Side, 3=Back
+
+    // Playback State
+    in-out property <bool> playing: false;
+    in-out property <int> current-frame: 0;
+    in-out property <int> total-frames: 60;
+    in-out property <string> speed-label: "1.0x";
+    in-out property <float> playhead-frac: 0.0;
+    in-out property <float> impact-frac: 0.35;
+    in-out property <bool> has-impact: false;
+    in-out property <string> impact-time-text: "Sin marca";
+    callback toggle-play();
+    callback step-frame(int);
+    callback jump-kf(int);
+    callback jump-edge(int);
+    callback cycle-speed();
+    callback studio-key(string, bool, bool, bool); // key_tag, ctrl, shift, alt
+    callback studio-key-up(string);
+
+    // Inspector Properties State
+    in-out property <int> inspector-tab: 0; // 0 Propiedades, 1 Huesos, 2 Eventos
+    in-out property <string> active-bone-name: "BrazoDerecho";
+    in-out property <int> active-bone-idx: 3;
+    in-out property <string> pos-x: "0.00";
+    in-out property <string> pos-y: "0.00";
+    in-out property <string> pos-z: "0.00";
+    in-out property <string> rot-x: "-48.0";
+    in-out property <string> rot-y: "-42.0";
+    in-out property <string> rot-z: "34.0";
+    in-out property <string> scl-x: "1.00";
+    in-out property <string> scl-y: "1.00";
+    in-out property <string> scl-z: "1.00";
+    in-out property <bool> anim-loop: false;
+    in-out property <string> duration-text: "0.48";
+    in-out property <float> duration-val: 0.48;
+    in-out property <int> easing-idx: 0;
+    in-out property <bool> shadows-enabled: true;
+    in-out property <bool> onion-enabled: true;
+    in-out property <bool> trail-enabled: true;
+    in-out property <int> bg-idx: 0; // 0 Estudio, 1 Sakura, 2 Océano
+
+    callback step-bone-axis(int, int, float); // chan(0 pos,1 rot,2 scl), axis(0..2), delta
+    callback scrub-axis-start();
+    callback scrub-bone-axis(int, int, float);
+    callback reset-bone-axis(int, int);
+    callback toggle-loop(bool);
+    callback change-duration(float);
+    callback set-easing(int);
+    callback toggle-shadows(bool);
+    callback toggle-onion(bool);
+    callback toggle-trail(bool);
+    callback set-bg-mode(int);
+    callback undo-action();
+    callback redo-action();
+    callback reset-pose-action();
+    callback copy-pose-action();
+    callback paste-pose-action();
+    callback mirror-pose-action();
+
+    // Timeline Tracks & Diamonds
+    in-out property <[TimelineTrack]> timeline-tracks: [];
+    in-out property <[TimelineTrack]> all-bones-tracks: [];
+    in-out property <[TimelineDiamond]> timeline-diamonds: [];
+    in-out property <[string]> ruler-ticks: ["0f", "5f", "10f", "15f", "20f", "25f", "30f"];
+    in-out property <bool> show-all-bones: false;
+    in-out property <int> selected-kf-idx: 0;
+    callback scrub-timeline(float);
+    callback click-diamond(int, int); // kf_idx, bone_idx
+    callback drag-diamond(int, float);
+    callback add-keyframe-action();
+    callback dup-kf-next();
+    callback delete-keyframe-action();
+    callback mark-impact-action();
+    callback toggle-auto-kf(bool);
+    callback toggle-all-bones();
+    callback select-bone-idx(int);
+    callback toggle-bone-visible(int);
+    callback show-all-bones-reset();
+
+    // Animation Gallery State
+    in-out property <string> gallery-search: "";
+    in-out property <int> gallery-filter: 0; // 0 Todas, 1 Combate, 2 Movimiento, 3 Defensa, 4 Especiales, 5 Interacción
+    in-out property <[GalleryItem]> gallery-items: [];
+    in-out property <string> featured-gallery-id: "action_1";
+    in-out property <string> featured-gallery-name: "Nueva Acción";
+    in-out property <image> featured-gallery-thumb;
+    callback filter-gallery(int);
+    callback search-gallery(string);
+    callback select-gallery-item(string);
+    callback add-gallery-clip(string);
+    callback create-blank-clip();
+    callback reset-blank-scene();
+    callback load-demo-presets();
+
+    // Live World Preview State
+    in-out property <image> world-viewport;
+    in-out property <int> fps-display: 144;
+    in-out property <bool> world-playing: true;
+    callback toggle-world-play();
+    callback cycle-world-camera();
+    callback world-pointer-down(float, float, int);
+    callback world-pointer-move(float, float, bool);
+    callback world-pointer-up();
+    callback world-wheel(float);
+
+    // Export State
+    in-out property <int> export-format-idx: 0; // 0 Bedrock 1.8.0, 1 GeckoLib 4.4.4, 2 Ambos
+    in-out property <string> export-dest: "./exports/";
+    in-out property <bool> include-events: true;
+    in-out property <bool> optimize-keyframes: true;
+    in-out property <string> gpu-adapter-name: "DirectX 12 / Vulkan";
+    in-out property <int> clips-count: 1;
+    in-out property <string> toast-message: "";
+    in-out property <bool> toast-visible: false;
+    callback browse-export-dest();
+    callback export-project-action();
+    callback export-strip-png-action();
+
+    root-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(ev) => {
+            if (!root.text-input-active) {
+                if (ev.text == Key.Space) {
+                    root.studio-key("space", ev.modifiers.control, ev.modifiers.shift, ev.modifiers.alt);
+                    return accept;
+                }
+                if (ev.text == Key.LeftArrow) {
+                    root.studio-key("left", ev.modifiers.control, ev.modifiers.shift, ev.modifiers.alt);
+                    return accept;
+                }
+                if (ev.text == Key.RightArrow) {
+                    root.studio-key("right", ev.modifiers.control, ev.modifiers.shift, ev.modifiers.alt);
+                    return accept;
+                }
+                if (ev.text == Key.Delete) {
+                    root.studio-key("del", ev.modifiers.control, ev.modifiers.shift, ev.modifiers.alt);
+                    return accept;
+                }
+                root.studio-key(ev.text, ev.modifiers.control, ev.modifiers.shift, ev.modifiers.alt);
+                return accept;
+            }
+            if (ev.text == Key.Escape) {
+                self.focus();
+                return accept;
+            }
+            reject
+        }
+        key-released(ev) => {
+            root.studio-key-up(ev.text);
+            accept
+        }
+        changed has-focus => {
+            if (!self.has-focus) {
+                root.studio-key-up("*");
+            }
+        }
+
+    VerticalLayout {
+        spacing: 8px;
+        padding: 0px;
+
+        // ==================== CUSTOM FRAMELESS TITLEBAR ====================
+        Rectangle {
+            height: 44px;
+            background: @linear-gradient(180deg, #151226 0%, #0e0c18 100%);
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                        root.start-drag();
+                    }
+                }
+                double-clicked => { root.win-maximize(); }
+            }
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 10px;
+                spacing: 14px;
+                alignment: space-between;
+
+                // Left Logo + Tabs
+                HorizontalLayout {
+                    spacing: 22px;
+                    alignment: start;
+
+                    HorizontalLayout {
+                        spacing: 9px;
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 7px;
+                            background: @linear-gradient(135deg, #7c3aed, #c084fc);
+                            Path {
+                                width: 16px;
+                                height: 16px;
+                                x: 5px;
+                                y: 5px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                fill: #ffffff;
+                                commands: "M12 2 L14.8 9.2 L22 12 L14.8 14.8 L12 22 L9.2 14.8 L2 12 L9.2 9.2 Z";
+                            }
+                        }
+                        Text {
+                            text: "VoxelMotion Studio";
+                            color: #ffffff;
+                            font-size: 14px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        for tab[idx] in ["Animaciones", "Biblioteca", "Proyecto", "Ajustes"] : TouchArea {
+                            mouse-cursor: pointer;
+                            width: 96px;
+                            height: 44px;
+                            clicked => { root.main-tab = idx; }
+
+                            Rectangle {
+                                y: 7px;
+                                height: 30px;
+                                border-radius: 7px;
+                                background: root.main-tab == idx ? @linear-gradient(180deg, #2d2057, #1c1636) : (parent.has-hover ? #1b1730 : transparent);
+                                border-width: root.main-tab == idx ? 1px : 0px;
+                                border-color: #7c3aed;
+
+                                Text {
+                                    text: tab;
+                                    color: root.main-tab == idx ? #ffffff : Theme.text-secondary;
+                                    font-size: 12px;
+                                    font-weight: root.main-tab == idx ? 600 : 500;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if root.main-tab == idx : Rectangle {
+                                y: parent.height - 2px;
+                                x: 18px;
+                                width: parent.width - 36px;
+                                height: 2px;
+                                border-radius: 1px;
+                                background: Theme.accent-bright;
+                            }
+                        }
+                    }
+                }
+
+                // Workspace Quick Actions + Window Chrome Buttons
+                HorizontalLayout {
+                    spacing: 5px;
+                    alignment: end;
+                    y: (parent.height - 28px) / 2;
+                    height: 28px;
+
+                    StudioButton { width: 82px; compact: true; label: "En Blanco"; clicked => { root.reset-blank-scene(); } }
+                    StudioButton { width: 92px; compact: true; label: "+ Ejemplos"; clicked => { root.load-demo-presets(); } }
+                    Rectangle { width: 6px; }
+
+                    TouchArea {
+                        width: 34px; height: 28px; mouse-cursor: pointer;
+                        clicked => { root.win-minimize(); }
+                        Rectangle {
+                            border-radius: 6px;
+                            background: parent.has-hover ? Theme.bg-hover : transparent;
+                            Text { text: "—"; color: Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    TouchArea {
+                        width: 34px; height: 28px; mouse-cursor: pointer;
+                        clicked => { root.win-maximize(); }
+                        Rectangle {
+                            border-radius: 6px;
+                            background: parent.has-hover ? Theme.bg-hover : transparent;
+                            Text { text: root.is-maximized ? "❐" : "□"; color: Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    close-ta := TouchArea {
+                        width: 34px; height: 28px; mouse-cursor: pointer;
+                        clicked => { root.win-close(); }
+                        Rectangle {
+                            border-radius: 6px;
+                            background: close-ta.has-hover ? #e11d48 : transparent;
+                            Text { text: "✕"; color: close-ta.has-hover ? #ffffff : Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ==================== TAB 0: ANIMATION STUDIO ====================
+        if root.main-tab == 0 : VerticalLayout {
+            spacing: 8px;
+            padding-left: 8px;
+            padding-right: 8px;
+            padding-bottom: 8px;
+            vertical-stretch: 1;
+
+            // -------- TOP ROW: WEAPON LIBRARY | MAIN 3D VIEWPORT | INSPECTOR --------
+            HorizontalLayout {
+                spacing: 8px;
+                vertical-stretch: 1;
+
+                // LEFT CARD: Biblioteca de Armas
+                PanelCard {
+                    width: 248px;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 5px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            spacing: 4px;
+                            Text { text: "Biblioteca de Ítems"; color: Theme.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                StudioButton { width: 66px; compact: true; label: "+ Importar"; clicked => { root.import-custom-weapons(); } }
+                                Text { text: root.total-weapon-count + ""; color: Theme.text-dim; font-size: 10px; vertical-alignment: center; }
+                            }
+                        }
+
+                        // Search Box
+                        Rectangle {
+                            height: 26px;
+                            border-radius: 6px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 6px; spacing: 6px;
+                                Rectangle {
+                                    width: 14px; height: 26px;
+                                    VectorIcon {
+                                        x: 0px; y: 6px;
+                                        icon-color: Theme.text-dim;
+                                        commands: "M11 4 A7 7 0 1 0 11 18 A7 7 0 1 0 11 4 Z M20 20 L16 16";
+                                    }
+                                }
+                                weapon-search-edit := LineEdit {
+                                    text <=> root.weapon-search;
+                                    placeholder-text: "Buscar ítem...";
+                                    font-size: 11px;
+                                    changed has-focus => { root.text-input-active = self.has-focus; }
+                                    edited(t) => { root.search-weapons(t); }
+                                }
+                            }
+                        }
+
+                        // Category Pills + Scrollable Matching Weapons
+                        VerticalLayout {
+                            spacing: 2px;
+                            for cat[cidx] in root.categories : TouchArea {
+                                height: 20px;
+                                mouse-cursor: pointer;
+                                clicked => { root.select-category(cidx); }
+                                Rectangle {
+                                    border-radius: 5px;
+                                    background: root.selected-category == cidx ?
+                                        @linear-gradient(90deg, #6d28d9, #8b5cf6) :
+                                        (parent.has-hover ? Theme.bg-hover : transparent);
+                                    HorizontalLayout {
+                                        padding-left: 8px; padding-right: 8px; alignment: space-between;
+                                        Text {
+                                            text: cat.name;
+                                            color: root.selected-category == cidx ? #ffffff : Theme.text-secondary;
+                                            font-size: 10.5px;
+                                            font-weight: root.selected-category == cidx ? 600 : 400;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: cat.count;
+                                            color: root.selected-category == cidx ? #ede9fe : Theme.text-dim;
+                                            font-size: 9.5px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Filtered Weapon Scroll Strip (Virtualized ListView for O(1) UI perf across 450+ weapons!)
+                        Rectangle {
+                            vertical-stretch: 1;
+                            min-height: 76px;
+                            border-radius: 7px;
+                            background: #0d0c16;
+                            border-width: 1px;
+                            border-color: #1f1b33;
+                            clip: true;
+
+                            ListView {
+                                for w in root.filtered-weapons : TouchArea {
+                                    height: 24px;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.select-weapon(w.index); }
+                                    Rectangle {
+                                        border-radius: 5px;
+                                        background: root.active-weapon-index == w.index ? #2a2050 : (parent.has-hover ? Theme.bg-hover : transparent);
+                                        border-width: root.active-weapon-index == w.index ? 1px : 0px;
+                                        border-color: Theme.accent;
+                                        HorizontalLayout {
+                                            padding-left: 5px; padding-right: 6px; spacing: 6px;
+                                            Image {
+                                                width: 16px; height: 16px;
+                                                y: 4px;
+                                                source: w.icon;
+                                                image-rendering: pixelated;
+                                            }
+                                            Text {
+                                                text: w.name;
+                                                color: root.active-weapon-index == w.index ? #ffffff : Theme.text-secondary;
+                                                font-size: 10px;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Bottom Highlighted Weapon Card (matching mockup!)
+                        Rectangle {
+                            height: 96px;
+                            border-radius: 8px;
+                            background: @linear-gradient(180deg, #1b182e 0%, #100e1b 100%);
+                            border-width: 1px;
+                            border-color: Theme.border-soft;
+
+                            VerticalLayout {
+                                padding: 6px;
+                                spacing: 3px;
+                                Image {
+                                    vertical-stretch: 1;
+                                    source: root.weapon-card-img;
+                                    image-fit: contain;
+                                }
+                                HorizontalLayout {
+                                    alignment: space-between;
+                                    VerticalLayout {
+                                        spacing: 0px;
+                                        Text { text: root.active-weapon-name; color: #ffffff; font-size: 10.5px; font-weight: 600; overflow: elide; }
+                                        Text { text: root.active-weapon-mod + " · " + root.active-weapon-class; color: Theme.text-dim; font-size: 9px; }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 2px;
+                                        StudioButton { width: 20px; compact: true; label: "<"; clicked => { root.cycle-weapon(-1); } }
+                                        StudioButton { width: 20px; compact: true; label: ">"; clicked => { root.cycle-weapon(1); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // CENTER CARD: Main 3D Viewport
+                PanelCard {
+                    horizontal-stretch: 1;
+                    border-color: #312a52;
+
+                    VerticalLayout {
+                        // Breadcrumb Top Strip
+                        Rectangle {
+                            height: 34px;
+                            background: #141222;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px; alignment: space-between;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: root.active-weapon-name + "  >  " + root.active-clip-name; color: Theme.text-primary; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    y: 4px;
+                                    height: 26px;
+                                    StudioButton { width: 76px; compact: true; label: root.solo-weapon ? "Solo Arma" : "Personaje"; active: root.solo-weapon; clicked => { root.toggle-solo-weapon(); } }
+                                    StudioButton { width: 42px; compact: true; label: "3/4"; clicked => { root.set-camera-preset(0); } }
+                                    StudioButton { width: 48px; compact: true; label: "Frente"; clicked => { root.set-camera-preset(1); } }
+                                    StudioButton { width: 42px; compact: true; label: "Lado"; clicked => { root.set-camera-preset(2); } }
+                                    StudioButton { width: 54px; compact: true; label: "Espalda"; clicked => { root.set-camera-preset(3); } }
+                                    StudioButton { width: 52px; compact: true; label: "Enfocar"; clicked => { root.focus-bone(); } }
+                                    StudioButton { width: 50px; compact: true; label: "Centrar"; clicked => { root.reset-camera(); } }
+                                }
+                            }
+                        }
+
+                        // GPU 3D Canvas Area
+                        Rectangle {
+                            vertical-stretch: 1;
+                            clip: true;
+
+                            vp-area := TouchArea {
+                                width: parent.width;
+                                height: parent.height;
+                                property <bool> dragging: false;
+                                property <float> last-w: 0;
+                                property <float> last-h: 0;
+
+                                changed width => {
+                                    root.viewport-resized(self.width / 1px, self.height / 1px);
+                                }
+                                changed height => {
+                                    root.viewport-resized(self.width / 1px, self.height / 1px);
+                                }
+
+                                Image {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    source: root.main-viewport;
+                                    image-fit: fill;
+                                }
+
+                                pointer-event(ev) => {
+                                    let mx = self.mouse-x / 1px;
+                                    let my = self.mouse-y / 1px;
+                                    let w = self.width / 1px;
+                                    let h = self.height / 1px;
+                                    let btn = ev.button == PointerEventButton.right ? 1 : (ev.button == PointerEventButton.middle ? 2 : 0);
+                                    if (ev.kind == PointerEventKind.down) {
+                                        root-focus.focus();
+                                        self.dragging = true;
+                                        root.vp-pointer-down(mx, my, btn, ev.modifiers.shift || ev.modifiers.alt, ev.modifiers.control, w, h);
+                                    } else if (ev.kind == PointerEventKind.move) {
+                                        if (self.dragging) {
+                                            root.vp-pointer-move(mx, my, ev.modifiers.shift || ev.modifiers.alt, ev.modifiers.control, w, h);
+                                        } else {
+                                            root.vp-pointer-hover(mx, my, w, h);
+                                        }
+                                    } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                                        if (self.dragging) {
+                                            self.dragging = false;
+                                            root.vp-pointer-up(mx, my, ev.modifiers.shift || ev.modifiers.alt, w, h);
+                                        }
+                                    }
+                                }
+                                scroll-event(ev) => {
+                                    root.vp-wheel(self.mouse-x / 1px, self.mouse-y / 1px, self.width / 1px, self.height / 1px, ev.delta-y / 1px);
+                                    accept
+                                }
+                            }
+
+                            // Top-Center-Left Live Bone/Gizmo HUD Pill + Navigation Hints
+                            Rectangle {
+                                x: 56px;
+                                y: 12px;
+                                width: 422px;
+                                height: 24px;
+                                border-radius: 6px;
+                                background: #141223dd;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                HorizontalLayout {
+                                    padding-left: 9px; padding-right: 9px; spacing: 7px;
+                                    Text { text: root.status-pill; color: #e9d5ff; font-size: 10px; font-weight: 600; vertical-alignment: center; }
+                                    Text { text: "Rueda: Zoom al cursor · F: Enfocar hueso · R: Centrar"; color: Theme.text-secondary; font-size: 9px; vertical-alignment: center; }
+                                }
+                            }
+
+                            // Floating Left Vertical Tool Bar (crisp SVG icons matching mockup!)
+                            Rectangle {
+                                x: 10px;
+                                y: 12px;
+                                width: 38px;
+                                height: 236px;
+                                border-radius: 9px;
+                                background: #141223dd;
+                                border-width: 1px;
+                                border-color: Theme.border-soft;
+
+                                VerticalLayout {
+                                    padding: 4px;
+                                    spacing: 3px;
+                                    // Select pointer arrow
+                                    ToolRailBtn { path-cmd: "M5 3 L19 12 L12 14 L9 21 Z"; filled: true; active: root.active-tool == 0; clicked => { root.active-tool = 0; root.select-tool(0); } }
+                                    // Rotate circle arc
+                                    ToolRailBtn { path-cmd: "M20 12 A8 8 0 1 1 14 4.3 M14 1 L15 5 L11 6"; active: root.active-tool == 1; clicked => { root.active-tool = 1; root.select-tool(1); } }
+                                    // Scale diagonal arrows
+                                    ToolRailBtn { path-cmd: "M15 4 L20 4 L20 9 M9 20 L4 20 L4 15 M20 4 L13 11 M4 20 L11 13"; active: root.active-tool == 2; clicked => { root.active-tool = 2; root.select-tool(2); } }
+                                    // Camera orbit lens
+                                    ToolRailBtn { path-cmd: "M4 8 H8 L10 5 H14 L16 8 H20 V19 H4 Z M12 10 A3.5 3.5 0 1 0 12 17 A3.5 3.5 0 1 0 12 10 Z"; active: root.active-tool == 3; clicked => { root.active-tool = 3; root.select-tool(3); } }
+                                    // Insert Keyframe diamond
+                                    ToolRailBtn { path-cmd: "M12 3 L20 12 L12 21 L4 12 Z"; filled: true; active: false; clicked => { root.add-keyframe-action(); } }
+                                    // Move cross arrows
+                                    ToolRailBtn { path-cmd: "M12 3 V21 M3 12 H21 M9 6 L12 3 L15 6 M9 18 L12 21 L15 18 M6 9 L3 12 L6 15 M18 9 L21 12 L18 15"; active: root.active-tool == 4; clicked => { root.active-tool = 4; root.select-tool(4); } }
+                                    // Mirror L/R
+                                    ToolRailBtn { path-cmd: "M12 4 V20 M7 7 L3 12 L7 17 Z M17 7 L21 12 L17 17 Z"; active: false; clicked => { root.mirror-pose-action(); } }
+                                }
+                            }
+
+                            // Top-Right Live 3D Orientation Triad
+                            Rectangle {
+                                x: parent.width - 56px;
+                                y: 10px;
+                                width: 46px;
+                                height: 46px;
+                                border-radius: 8px;
+                                background: #12101dcc;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+
+                                // Axis lines drawn cleanly from center (23, 23)
+                                Path {
+                                    width: 46px; height: 46px; viewbox-width: 46; viewbox-height: 46;
+                                    stroke: Theme.axis-x; stroke-width: 2px;
+                                    MoveTo { x: 23; y: 23; }
+                                    LineTo { x: 23 + root.triad-x-dx; y: 23 + root.triad-x-dy; }
+                                }
+                                Path {
+                                    width: 46px; height: 46px; viewbox-width: 46; viewbox-height: 46;
+                                    stroke: Theme.axis-y; stroke-width: 2px;
+                                    MoveTo { x: 23; y: 23; }
+                                    LineTo { x: 23 + root.triad-y-dx; y: 23 + root.triad-y-dy; }
+                                }
+                                Path {
+                                    width: 46px; height: 46px; viewbox-width: 46; viewbox-height: 46;
+                                    stroke: Theme.axis-z; stroke-width: 2px;
+                                    MoveTo { x: 23; y: 23; }
+                                    LineTo { x: 23 + root.triad-z-dx; y: 23 + root.triad-z-dy; }
+                                }
+                                Text { x: (20 + root.triad-x-dx) * 1px; y: (17 + root.triad-x-dy) * 1px; text: "X"; font-size: 8px; font-weight: 700; color: Theme.axis-x; }
+                                Text { x: (20 + root.triad-y-dx) * 1px; y: (17 + root.triad-y-dy) * 1px; text: "Y"; font-size: 8px; font-weight: 700; color: Theme.axis-y; }
+                                Text { x: (20 + root.triad-z-dx) * 1px; y: (17 + root.triad-z-dy) * 1px; text: "Z"; font-size: 8px; font-weight: 700; color: Theme.axis-z; }
+                            }
+
+                            // Bottom-Center Transport Bar Overlay (with frame-by-frame & KF steppers)
+                            Rectangle {
+                                x: (parent.width - self.width) / 2;
+                                y: parent.height - 42px;
+                                width: 472px;
+                                height: 32px;
+                                border-radius: 8px;
+                                background: #141223e6;
+                                border-width: 1px;
+                                border-color: Theme.border-soft;
+
+                                HorizontalLayout {
+                                    padding-left: 7px; padding-right: 7px; spacing: 5px; alignment: space-between;
+                                    HorizontalLayout {
+                                        spacing: 3px;
+                                        alignment: center;
+                                        TransportIconBtn { width: 22px; kind: "first"; clicked => { root.jump-edge(0); } }
+                                        StudioButton { width: 28px; compact: true; label: "<KF"; clicked => { root.jump-kf(-1); } }
+                                        StudioButton { width: 26px; compact: true; label: "-1f"; clicked => { root.step-frame(-1); } }
+                                        TransportIconBtn { width: 28px; primary: true; kind: root.playing ? "pause" : "play"; clicked => { root.toggle-play(); } }
+                                        StudioButton { width: 26px; compact: true; label: "+1f"; clicked => { root.step-frame(1); } }
+                                        StudioButton { width: 28px; compact: true; label: "KF>"; clicked => { root.jump-kf(1); } }
+                                        TransportIconBtn { width: 22px; kind: "last"; clicked => { root.jump-edge(1); } }
+                                    }
+                                    Text { text: root.current-frame + "/" + root.total-frames + " · " + root.kf-badge; color: Theme.text-primary; font-size: 10px; vertical-alignment: center; }
+                                    HorizontalLayout {
+                                        spacing: 3px;
+                                        alignment: center;
+                                        StudioButton { width: 38px; compact: true; label: root.speed-label; clicked => { root.cycle-speed(); } }
+                                        StudioButton { width: 48px; compact: true; label: "Cebolla"; active: root.onion-enabled; clicked => { root.toggle-onion(!root.onion-enabled); } }
+                                        StudioButton { width: 44px; compact: true; label: "Estela"; active: root.trail-enabled; clicked => { root.toggle-trail(!root.trail-enabled); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // RIGHT CARD: Inspector (Propiedades | Huesos | Eventos)
+                PanelCard {
+                    width: 264px;
+                    VerticalLayout {
+                        padding: 9px;
+                        spacing: 6px;
+
+                        // Inspector Tabs
+                        Rectangle {
+                            height: 28px;
+                            border-radius: 7px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            HorizontalLayout {
+                                padding: 2px;
+                                spacing: 2px;
+                                for t[ti] in ["Propiedades", "Huesos", "Eventos"] : TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.inspector-tab = ti; }
+                                    Rectangle {
+                                        border-radius: 5px;
+                                        background: root.inspector-tab == ti ? @linear-gradient(90deg, #5b21b6, #7c3aed) : transparent;
+                                        Text {
+                                            text: t;
+                                            color: root.inspector-tab == ti ? #ffffff : Theme.text-secondary;
+                                            font-size: 11px;
+                                            font-weight: root.inspector-tab == ti ? 600 : 500;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Inspector Tab 0: Propiedades
+                        if root.inspector-tab == 0 : VerticalLayout {
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Transformación · " + root.active-bone-name; color: Theme.text-secondary; font-size: 11px; font-weight: 600; }
+                                StudioButton { width: 46px; compact: true; label: "Reset"; clicked => { root.reset-pose-action(); } }
+                            }
+
+                            // Posición
+                            VerticalLayout {
+                                spacing: 3px;
+                                Text { text: "Posición (px · arrastrar o doble clic)"; color: Theme.text-dim; font-size: 9.5px; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.pos-x; step(d) => { root.step-bone-axis(0, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(0, 0, dx); } reset-axis => { root.reset-bone-axis(0, 0); } }
+                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.pos-y; step(d) => { root.step-bone-axis(0, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(0, 1, dx); } reset-axis => { root.reset-bone-axis(0, 1); } }
+                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.pos-z; step(d) => { root.step-bone-axis(0, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(0, 2, dx); } reset-axis => { root.reset-bone-axis(0, 2); } }
+                                }
+                            }
+
+                            // Rotación
+                            VerticalLayout {
+                                spacing: 3px;
+                                Text { text: "Rotación (°)"; color: Theme.text-dim; font-size: 9.5px; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.rot-x; step(d) => { root.step-bone-axis(1, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(1, 0, dx); } reset-axis => { root.reset-bone-axis(1, 0); } }
+                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.rot-y; step(d) => { root.step-bone-axis(1, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(1, 1, dx); } reset-axis => { root.reset-bone-axis(1, 1); } }
+                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.rot-z; step(d) => { root.step-bone-axis(1, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(1, 2, dx); } reset-axis => { root.reset-bone-axis(1, 2); } }
+                                }
+                            }
+
+                            // Escala
+                            VerticalLayout {
+                                spacing: 3px;
+                                Text { text: "Escala"; color: Theme.text-dim; font-size: 9.5px; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.scl-x; step(d) => { root.step-bone-axis(2, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(2, 0, dx); } reset-axis => { root.reset-bone-axis(2, 0); } }
+                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.scl-y; step(d) => { root.step-bone-axis(2, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(2, 1, dx); } reset-axis => { root.reset-bone-axis(2, 1); } }
+                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.scl-z; step(d) => { root.step-bone-axis(2, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(2, 2, dx); } reset-axis => { root.reset-bone-axis(2, 2); } }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                            Text { text: "Opciones de Animación"; color: Theme.text-secondary; font-size: 11px; font-weight: 600; }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Loop"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                NeonToggle { checked: root.anim-loop; toggled(v) => { root.toggle-loop(v); } }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: space-between;
+                                Text { text: "Duración (s)"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                Rectangle {
+                                    width: 52px; height: 22px; border-radius: 5px; background: Theme.bg-input; border-width: 1px; border-color: Theme.border-subtle;
+                                    Text { text: root.duration-text; color: #ffffff; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 3px;
+                                    StudioButton { width: 22px; compact: true; label: "-"; clicked => { root.change-duration(root.duration-val - 0.05); } }
+                                    StudioButton { width: 22px; compact: true; label: "+"; clicked => { root.change-duration(root.duration-val + 0.05); } }
+                                }
+                            }
+
+                            // Easing pills
+                            HorizontalLayout {
+                                spacing: 3px;
+                                for e[ei] in ["Snap", "Peso", "Suave", "Lineal"] : StudioButton {
+                                    compact: true;
+                                    horizontal-stretch: 1;
+                                    label: e;
+                                    active: root.easing-idx == ei;
+                                    clicked => { root.set-easing(ei); }
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                            Text { text: "Vista"; color: Theme.text-secondary; font-size: 11px; font-weight: 600; }
+
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Sombras"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                NeonToggle { checked: root.shadows-enabled; toggled(v) => { root.toggle-shadows(v); } }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: space-between;
+                                Text { text: "Fondo"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                for bg[bi] in ["Estudio", "Sakura", "Océano"] : StudioButton {
+                                    compact: true;
+                                    width: 58px;
+                                    label: bg;
+                                    active: root.bg-idx == bi;
+                                    clicked => { root.set-bg-mode(bi); }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 4px;
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "< Deshacer"; clicked => { root.undo-action(); } }
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "Rehacer >"; clicked => { root.redo-action(); } }
+                            }
+                        }
+
+                        // Inspector Tab 1: Huesos (ALL 8 bones + eye toggle!)
+                        if root.inspector-tab == 1 : VerticalLayout {
+                            spacing: 4px;
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text { text: "Esqueleto (8 huesos)"; color: Theme.text-secondary; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                                StudioButton { width: 78px; compact: true; label: "Ver Todos"; clicked => { root.show-all-bones-reset(); } }
+                            }
+                            for b in root.all-bones-tracks : TouchArea {
+                                height: 24px; mouse-cursor: pointer;
+                                clicked => { root.select-bone-idx(b.bone_idx); }
+                                Rectangle {
+                                    border-radius: 5px;
+                                    background: b.active ? #2d2055 : (parent.has-hover ? Theme.bg-hover : Theme.bg-card);
+                                    border-width: 1px;
+                                    border-color: b.active ? Theme.accent : Theme.border-subtle;
+                                    HorizontalLayout {
+                                        padding-left: 8px; padding-right: 6px; spacing: 7px;
+                                        Rectangle { width: 7px; height: 7px; y: 8.5px; border-radius: 4px; background: b.dot_color; }
+                                        Text { text: b.name; color: b.active ? #ffffff : (b.visible ? Theme.text-secondary : Theme.text-dim); font-size: 10.5px; vertical-alignment: center; horizontal-stretch: 1; }
+                                        TouchArea {
+                                            width: 18px; height: 24px; mouse-cursor: pointer;
+                                            clicked => { root.toggle-bone-visible(b.bone_idx); }
+                                            VectorIcon {
+                                                x: 2px; y: 5px;
+                                                icon-color: b.visible ? Theme.text-secondary : #413b61;
+                                                commands: "M2 12 C5 7 9 5 12 5 C15 5 19 7 22 12 C19 17 15 19 12 19 C9 19 5 17 2 12 Z M12 9 A3 3 0 1 0 12 15 A3 3 0 1 0 12 9 Z";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "Copiar Pose"; clicked => { root.copy-pose-action(); } }
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "Pegar Pose"; clicked => { root.paste-pose-action(); } }
+                                StudioButton { compact: true; width: 52px; label: "Espejo"; clicked => { root.mirror-pose-action(); } }
+                            }
+                        }
+
+                        // Inspector Tab 2: Eventos
+                        if root.inspector-tab == 2 : VerticalLayout {
+                            spacing: 8px;
+                            Text { text: "Marcador de Impacto / Hit-Stop"; color: Theme.text-secondary; font-size: 11px; font-weight: 600; }
+                            Rectangle {
+                                height: 34px; border-radius: 7px; background: Theme.bg-input; border-width: 1px; border-color: Theme.border-subtle;
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px; alignment: space-between;
+                                    Text { text: "Instante exacto de golpe:"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                    Text { text: root.impact-time-text; color: Theme.gold; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+                                }
+                            }
+                            IconPrimaryButton { icon-commands: "M12 3 L14.8 9 L21 9.8 L16.2 14.2 L17.6 20.5 L12 17.2 L6.4 20.5 L7.8 14.2 L3 9.8 L9.2 9 Z"; label: "Marcar Impacto Aquí"; clicked => { root.mark-impact-action(); } }
+                            StudioButton { label: "Duplicar Keyframe (+0.10s)"; clicked => { root.dup-kf-next(); } }
+                            StudioButton { label: "+ Nuevo Clip en Blanco"; clicked => { root.create-blank-clip(); } }
+                            StudioButton { label: "Exportar Tira PNG (6 frames)"; clicked => { root.export-strip-png-action(); } }
+                            Text {
+                                text: "Exporta eventos e impacto exacto (impact_time) en JSON para Bedrock, GeckoLib y Minecraft.";
+                                color: Theme.text-dim;
+                                font-size: 10px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -------- MIDDLE FULL-WIDTH MULTI-TRACK TIMELINE --------
+            PanelCard {
+                height: 136px;
+
+                VerticalLayout {
+                    padding: 0px;
+                    spacing: 0px;
+
+                    // Header + Frame Ruler
+                    Rectangle {
+                        height: 28px;
+                        background: #141222;
+                        border-width: 1px;
+                        border-color: Theme.border-subtle;
+
+                        HorizontalLayout {
+                            // Track Controls Column Header (aligned cleanly with 248px sidebar!)
+                            Rectangle {
+                                width: 248px;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                HorizontalLayout {
+                                    padding-left: 7px; padding-right: 6px; spacing: 3px; alignment: space-between;
+                                    Text { text: "Pistas"; color: Theme.text-primary; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                                    HorizontalLayout {
+                                        spacing: 2px;
+                                        alignment: center;
+                                        StudioButton { width: 46px; compact: true; label: "AutoKF"; active: root.auto-keyframe; clicked => { root.toggle-auto-kf(!root.auto-keyframe); } }
+                                        StudioButton { width: 26px; compact: true; label: "8H"; active: root.show-all-bones; clicked => { root.toggle-all-bones(); } }
+                                        StudioButton { width: 21px; compact: true; label: "+"; clicked => { root.add-keyframe-action(); } }
+                                        StudioButton { width: 24px; compact: true; label: "Cp"; clicked => { root.dup-kf-next(); } }
+                                        TouchArea {
+                                            width: 21px; height: 24px; mouse-cursor: pointer;
+                                            clicked => { root.mark-impact-action(); }
+                                            Rectangle {
+                                                border-radius: 5px;
+                                                background: parent.has-hover ? Theme.bg-hover : Theme.bg-input;
+                                                border-width: 1px;
+                                                border-color: Theme.border-subtle;
+                                                Path {
+                                                    width: 11px; height: 11px; x: 5px; y: 6.5px;
+                                                    viewbox-width: 24; viewbox-height: 24;
+                                                    fill: Theme.gold;
+                                                    commands: "M12 2 L14.8 8.8 L22 9.6 L16.6 14.3 L18.2 21.4 L12 17.6 L5.8 21.4 L7.4 14.3 L2 9.6 L9.2 8.8 Z";
+                                                }
+                                            }
+                                        }
+                                        StudioButton { width: 21px; compact: true; label: "-"; clicked => { root.delete-keyframe-action(); } }
+                                    }
+                                }
+                            }
+
+                            // Scrubbable Ruler 0f .. 60f
+                            ruler-touch := TouchArea {
+                                horizontal-stretch: 1;
+                                mouse-cursor: pointer;
+                                property <bool> scrubbing: false;
+                                pointer-event(ev) => {
+                                    let f = clamp((self.mouse-x / 1px) / max(1.0, (self.width / 1px)), 0.0, 1.0);
+                                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                        self.scrubbing = true;
+                                        root.scrub-timeline(f);
+                                    } else if (ev.kind == PointerEventKind.move && self.scrubbing) {
+                                        root.scrub-timeline(f);
+                                    } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                                        self.scrubbing = false;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px; alignment: space-between;
+                                    for tick in root.ruler-ticks : Text {
+                                        text: tick;
+                                        color: Theme.text-dim;
+                                        font-size: 9.5px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Scrollable Tracks Body (syncs Track Names + Draggable Keyframe Lanes across 4 or 8 bones!)
+                    Flickable {
+                        vertical-stretch: 1;
+                        interactive: root.show-all-bones;
+                        content-height: max(self.height, root.timeline-tracks.length * 25px + 8px);
+
+                        HorizontalLayout {
+                            width: parent.width;
+                            height: max(parent.height, root.timeline-tracks.length * 25px + 8px);
+
+                            // Left Track Names Column
+                            Rectangle {
+                                width: 248px;
+                                background: #100e1b;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                VerticalLayout {
+                                    padding: 4px;
+                                    spacing: 3px;
+                                    for tr in root.timeline-tracks : TouchArea {
+                                        height: 22px;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.select-bone-idx(tr.bone_idx); }
+                                        Rectangle {
+                                            border-radius: 5px;
+                                            background: tr.active ? #281e4a : transparent;
+                                            HorizontalLayout {
+                                                padding-left: 8px; padding-right: 8px; spacing: 7px;
+                                                Rectangle { width: 7px; height: 7px; y: 7.5px; border-radius: 4px; background: tr.dot_color; }
+                                                Text {
+                                                    text: tr.name;
+                                                    color: tr.active ? #ffffff : (tr.visible ? Theme.text-secondary : Theme.text-dim);
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+                                                TouchArea {
+                                                    width: 18px; height: 22px; mouse-cursor: pointer;
+                                                    clicked => { root.toggle-bone-visible(tr.bone_idx); }
+                                                    VectorIcon {
+                                                        x: 2px; y: 4px;
+                                                        icon-color: tr.visible ? Theme.text-secondary : #383354;
+                                                        commands: "M2 12 C5 7 9 5 12 5 C15 5 19 7 22 12 C19 17 15 19 12 19 C9 19 5 17 2 12 Z M12 9 A3 3 0 1 0 12 15 A3 3 0 1 0 12 9 Z";
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right Keyframe Lanes Area (clipped inside Rectangle)
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                clip: true;
+
+                                lanes-area := TouchArea {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    property <bool> dragging-playhead: false;
+
+                                    pointer-event(ev) => {
+                                        let f = clamp((self.mouse-x / 1px - 8.0) / max(1.0, (self.width / 1px) - 16.0), 0.0, 1.0);
+                                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                            root-focus.focus();
+                                            self.dragging-playhead = true;
+                                            root.scrub-timeline(f);
+                                        } else if (ev.kind == PointerEventKind.move && self.dragging-playhead) {
+                                            root.scrub-timeline(f);
+                                        } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                                            self.dragging-playhead = false;
+                                        }
+                                    }
+
+                                    // Horizontal Track Guide Lines
+                                    for tr[ti] in root.timeline-tracks : Rectangle {
+                                        x: 0px;
+                                        y: 4px + ti * 25px + 11px;
+                                        width: parent.width;
+                                        height: 1px;
+                                        background: #221e38;
+                                    }
+
+                                    // Gold Impact Marker Line
+                                    if root.has-impact : Rectangle {
+                                        x: root.impact-frac * (parent.width - 16px) + 8px;
+                                        y: 2px;
+                                        width: 2px;
+                                        height: parent.height - 4px;
+                                        background: #f59e0b88;
+                                    }
+
+                                    // Colored Draggable Keyframe Diamonds per Track
+                                    for dm in root.timeline-diamonds : TouchArea {
+                                        x: dm.frac * (parent.width - 16px) + 8px - 7px;
+                                        y: 4px + dm.track_idx * 25px + 4px;
+                                        width: 14px;
+                                        height: 14px;
+                                        mouse-cursor: ew-resize;
+                                        property <bool> dragging-dm: false;
+                                        property <bool> moved-dm: false;
+                                        property <float> press-x: 0;
+                                        pointer-event(ev) => {
+                                            let mx = self.mouse-x / 1px;
+                                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                                root-focus.focus();
+                                                self.dragging-dm = true;
+                                                self.moved-dm = false;
+                                                self.press-x = (self.x / 1px) + mx;
+                                                root.click-diamond(dm.kf_idx, dm.track_idx);
+                                            } else if (ev.kind == PointerEventKind.move && self.dragging-dm) {
+                                                let abs_x = (self.x / 1px) + mx;
+                                                if (abs(abs_x - self.press-x) > 2.5) {
+                                                    self.moved-dm = true;
+                                                    let lane_w = max(1.0, (lanes-area.width / 1px) - 16.0);
+                                                    let new_f = clamp((abs_x - 8.0) / lane_w, 0.0, 1.0);
+                                                    root.drag-diamond(dm.kf_idx, new_f);
+                                                }
+                                            } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                                                self.dragging-dm = false;
+                                            }
+                                        }
+                                        Path {
+                                            width: 12px; height: 12px; x: 1px; y: 1px; viewbox-width: 12; viewbox-height: 12;
+                                            fill: dm.is_selected ? #ffffff : (dm.is_impact ? Theme.gold : dm.dot_color);
+                                            stroke: Theme.bg-shell;
+                                            stroke-width: 1px;
+                                            commands: "M6 1 L11 6 L6 11 L1 6 Z";
+                                        }
+                                    }
+
+                                    // Glowing Purple Playhead
+                                    Rectangle {
+                                        x: root.playhead-frac * (parent.width - 16px) + 8px;
+                                        y: 0px;
+                                        width: 2px;
+                                        height: parent.height;
+                                        background: Theme.accent-bright;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -------- BOTTOM 4-CARD STUDIO DOCK (Exact Balanced Proportions, Zero Bottom Clip!) --------
+            HorizontalLayout {
+                height: 224px;
+                spacing: 8px;
+
+                // Card 1: Galería de Animaciones (~37%)
+                PanelCard {
+                    horizontal-stretch: 37;
+                    min-width: 340px;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 5px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "Galería de Clips"; color: Theme.text-primary; font-size: 11.5px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                            StudioButton { width: 64px; compact: true; label: "+ Demo"; clicked => { root.load-demo-presets(); } }
+                            Rectangle {
+                                width: 132px; height: 22px; border-radius: 5px; background: Theme.bg-input; border-width: 1px; border-color: Theme.border-subtle;
+                                HorizontalLayout {
+                                    padding-left: 6px; padding-right: 4px; spacing: 4px;
+                                    Rectangle {
+                                        width: 12px; height: 22px;
+                                        VectorIcon {
+                                            x: 0px; y: 5px; width: 12px; height: 12px;
+                                            icon-color: Theme.text-dim;
+                                            commands: "M11 4 A7 7 0 1 0 11 18 A7 7 0 1 0 11 4 Z M20 20 L16 16";
+                                        }
+                                    }
+                                    gallery-search-edit := LineEdit {
+                                        text <=> root.gallery-search;
+                                        changed has-focus => { root.text-input-active = self.has-focus; }
+                                        placeholder-text: "Buscar clip...";
+                                        font-size: 10px;
+                                        edited(t) => { root.search-gallery(t); }
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 3px;
+                            for pill[pi] in ["Todas", "Combate", "Movimiento", "Defensa", "Especiales", "Interacción"] : StudioButton {
+                                compact: true;
+                                horizontal-stretch: 1;
+                                label: pill;
+                                active: root.gallery-filter == pi;
+                                clicked => { root.filter-gallery(pi); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            vertical-stretch: 1;
+                            spacing: 8px;
+
+                            // Clean horizontally-scrollable tile strip bounded inside Rectangle
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                clip: true;
+                                Flickable {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    interactive: true;
+                                    content-height: parent.height;
+                                    content-width: max(self.width, root.gallery-items.length * 73px);
+                                    HorizontalLayout {
+                                        spacing: 5px;
+                                        padding-top: 2px;
+                                        padding-bottom: 2px;
+                                        for item in root.gallery-items : TouchArea {
+                                            width: 68px; height: 120px; mouse-cursor: pointer;
+                                            clicked => { root.select-gallery-item(item.id); }
+                                            Rectangle {
+                                                border-radius: 7px;
+                                                background: item.active ? #2b2050 : Theme.bg-card;
+                                                border-width: 1px;
+                                                border-color: item.active ? Theme.accent-bright : Theme.border-subtle;
+                                                VerticalLayout {
+                                                    padding: 4px; spacing: 3px;
+                                                    Image { vertical-stretch: 1; source: item.thumb; image-fit: contain; }
+                                                    Text { text: item.name; color: item.active ? #ffffff : Theme.text-secondary; font-size: 9px; horizontal-alignment: center; overflow: elide; }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right Featured Tile + Agregar CTA
+                            Rectangle {
+                                width: 104px;
+                                border-radius: 8px;
+                                background: @linear-gradient(180deg, #1d1931 0%, #100e1b 100%);
+                                border-width: 1px;
+                                border-color: Theme.border-soft;
+                                VerticalLayout {
+                                    padding: 5px; spacing: 3px;
+                                    Image { vertical-stretch: 1; source: root.featured-gallery-thumb; image-fit: contain; }
+                                    Text { text: root.featured-gallery-name; color: #ffffff; font-size: 9.5px; font-weight: 600; horizontal-alignment: center; overflow: elide; }
+                                    HorizontalLayout {
+                                        spacing: 3px;
+                                        TransportIconBtn { width: 22px; kind: root.playing ? "pause" : "play"; primary: root.playing; clicked => { root.toggle-play(); } }
+                                        StudioButton { horizontal-stretch: 1; compact: true; primary: true; label: "Clonar"; clicked => { root.add-gallery-clip(root.featured-gallery-id); } }
+                                        StudioButton { width: 22px; compact: true; label: "+"; clicked => { root.create-blank-clip(); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Card 2: Vista Previa en Juego (~33% wide 16:9!)
+                PanelCard {
+                    horizontal-stretch: 33;
+                    min-width: 300px;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 5px;
+
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Vista Previa en Juego"; color: Theme.text-primary; font-size: 11.5px; font-weight: 600; vertical-alignment: center; }
+                            Rectangle {
+                                width: 62px; height: 18px; border-radius: 5px; background: #141222; border-width: 1px; border-color: Theme.border-soft;
+                                Text { text: "FPS: " + root.fps-display; color: Theme.green; font-size: 9.5px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            border-radius: 7px;
+                            border-width: 1px;
+                            border-color: Theme.border-subtle;
+                            clip: true;
+
+                            world-touch := TouchArea {
+                                width: parent.width; height: parent.height;
+                                property <bool> w-dragging: false;
+                                changed width => { root.world-resized(self.width / 1px, self.height / 1px); }
+                                changed height => { root.world-resized(self.width / 1px, self.height / 1px); }
+                                pointer-event(ev) => {
+                                    let mx = self.mouse-x / 1px;
+                                    let my = self.mouse-y / 1px;
+                                    let btn = ev.button == PointerEventButton.right ? 1 : (ev.button == PointerEventButton.middle ? 2 : 0);
+                                    if (ev.kind == PointerEventKind.down) {
+                                        self.w-dragging = true;
+                                        root.world-pointer-down(mx, my, btn);
+                                    } else if (ev.kind == PointerEventKind.move && self.w-dragging) {
+                                        root.world-pointer-move(mx, my, ev.modifiers.shift || ev.modifiers.alt);
+                                    } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                                        self.w-dragging = false;
+                                        root.world-pointer-up();
+                                    }
+                                }
+                                scroll-event(ev) => {
+                                    root.world-wheel(ev.delta-y / 1px);
+                                    accept
+                                }
+                                Image {
+                                    width: parent.width; height: parent.height;
+                                    source: root.world-viewport;
+                                    image-fit: fill;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 7px; height: 22px;
+                            TransportIconBtn { width: 26px; kind: root.world-playing ? "pause" : "play"; clicked => { root.toggle-world-play(); } }
+                            Rectangle {
+                                horizontal-stretch: 1; height: 4px; y: 9px; border-radius: 2px; background: Theme.bg-input;
+                                Rectangle {
+                                    x: 0px; height: 4px; border-radius: 2px;
+                                    width: root.playhead-frac * parent.width;
+                                    background: @linear-gradient(90deg, #7c3aed, #c084fc);
+                                }
+                            }
+                            StudioButton { width: 48px; compact: true; label: "Ángulo"; clicked => { root.cycle-world-camera(); } }
+                        }
+                    }
+                }
+
+                // Card 3: Exportar Animaciones (~20%)
+                PanelCard {
+                    horizontal-stretch: 20;
+                    min-width: 215px;
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 5px;
+
+                        Text { text: "Exportar Animaciones"; color: Theme.text-primary; font-size: 11.5px; font-weight: 600; }
+
+                        HorizontalLayout {
+                            spacing: 5px;
+                            Text { width: 46px; text: "Formato"; color: Theme.text-dim; font-size: 10px; vertical-alignment: center; }
+                            HorizontalLayout {
+                                horizontal-stretch: 1; spacing: 3px;
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "Bedrock"; active: root.export-format-idx == 0; clicked => { root.export-format-idx = 0; } }
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "Gecko4"; active: root.export-format-idx == 1; clicked => { root.export-format-idx = 1; } }
+                                StudioButton { compact: true; horizontal-stretch: 1; label: "Ambos"; active: root.export-format-idx == 2; clicked => { root.export-format-idx = 2; } }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { width: 46px; text: "Destino"; color: Theme.text-dim; font-size: 10px; vertical-alignment: center; }
+                            Rectangle {
+                                horizontal-stretch: 1; height: 22px; border-radius: 5px; background: Theme.bg-input; border-width: 1px; border-color: Theme.border-subtle;
+                                clip: true;
+                                Text {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    text: root.export-dest;
+                                    color: Theme.text-secondary;
+                                    font-size: 9.5px;
+                                    overflow: elide;
+                                    horizontal-alignment: left;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            TouchArea {
+                                width: 24px; height: 22px; mouse-cursor: pointer;
+                                clicked => { root.browse-export-dest(); }
+                                Rectangle {
+                                    border-radius: 5px;
+                                    background: parent.has-hover ? Theme.bg-hover : Theme.bg-card;
+                                    border-width: 1px; border-color: Theme.border-subtle;
+                                    VectorIcon {
+                                        x: 5px; y: 4px; width: 13px; height: 13px;
+                                        icon-color: Theme.text-secondary;
+                                        commands: "M3 6 H10 L12 8 H21 V19 H3 Z";
+                                    }
+                                }
+                            }
+                        }
+
+                        StudioCheckbox { label: "Incluir eventos"; checked: root.include-events; toggled(v) => { root.include-events = v; } }
+                        StudioCheckbox { label: "Optimizar keyframes"; checked: root.optimize-keyframes; toggled(v) => { root.optimize-keyframes = v; } }
+
+                        IconPrimaryButton {
+                            label: "Exportar Proyecto";
+                            clicked => { root.export-project-action(); }
+                        }
+                    }
+                }
+
+                // Card 4: VOXELMOTION Brand Studio Card (~10%)
+                PanelCard {
+                    horizontal-stretch: 10;
+                    min-width: 115px;
+                    background: @linear-gradient(155deg, #1b1630 0%, #0d0c16 65%, #16112a 100%);
+                    border-color: #362d5e;
+                    VerticalLayout {
+                        padding: 8px;
+                        alignment: center;
+                        spacing: 6px;
+
+                        Rectangle {
+                            width: 40px; height: 40px;
+                            x: (parent.width - self.width) / 2;
+                            border-radius: 11px;
+                            background: @linear-gradient(135deg, #6d28d9, #c084fc);
+                            Path {
+                                width: 22px; height: 22px; x: 9px; y: 9px;
+                                viewbox-width: 24; viewbox-height: 24;
+                                fill: #ffffff;
+                                commands: "M12 2 L15 9 L22 12 L15 15 L12 22 L9 15 L2 12 L9 9 Z";
+                            }
+                        }
+
+                        Text { text: "VOXELMOTION\nSTUDIO"; color: #ffffff; font-size: 11px; font-weight: 700; horizontal-alignment: center; }
+                        Text { text: "Animate. Create. Enjoy"; color: Theme.text-dim; font-size: 9px; horizontal-alignment: center; }
+                    }
+                }
+            }
+        }
+
+        // ==================== TAB 1: BIBLIOTECA COMPLETA ====================
+        if root.main-tab == 1 : PanelCard {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 16px; spacing: 12px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text { text: "Catálogo de Ítems y Sprites (" + root.total-weapon-count + " cargados)"; color: #ffffff; font-size: 15px; font-weight: 700; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        StudioButton { width: 175px; primary: true; label: "+ Importar (.png / .jar)"; clicked => { root.import-custom-weapons(); } }
+                        StudioButton { width: 170px; label: "< Volver a Animaciones"; clicked => { root.main-tab = 0; } }
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for w in root.filtered-weapons : TouchArea {
+                        height: 36px; mouse-cursor: pointer;
+                        clicked => { root.select-weapon(w.index); root.main-tab = 0; }
+                        Rectangle {
+                            border-radius: 7px;
+                            background: parent.has-hover ? Theme.bg-hover : Theme.bg-card;
+                            border-width: 1px; border-color: Theme.border-subtle;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 12px; spacing: 10px;
+                                Image { width: 24px; height: 24px; y: 6px; source: w.icon; image-rendering: pixelated; }
+                                Text { text: w.name; color: #ffffff; font-size: 12px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: w.id; color: Theme.text-dim; font-size: 11px; vertical-alignment: center; }
+                                Text { text: w.category; color: Theme.accent-bright; font-size: 11px; vertical-alignment: center; }
+                                Text { text: w.mod_name; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ==================== TAB 2: PROYECTO ====================
+        if root.main-tab == 2 : PanelCard {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 20px; spacing: 12px; alignment: start;
+                Text { text: "Estado del Proyecto — VoxelMotion Studio"; color: #ffffff; font-size: 16px; font-weight: 700; }
+                Text { text: "• Clips totales en escena: " + root.clips-count; color: Theme.text-secondary; font-size: 12.5px; }
+                Text { text: "• Ítems voxelizados cargados (base + importados): " + root.total-weapon-count; color: Theme.text-secondary; font-size: 12.5px; }
+                Text { text: "• Carpeta de exportación activa: " + root.export-dest; color: Theme.text-secondary; font-size: 12.5px; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    StudioButton { width: 170px; label: "Nueva Escena en Blanco"; clicked => { root.reset-blank-scene(); } }
+                    StudioButton { width: 175px; label: "+ Cargar Plantillas Demo"; clicked => { root.load-demo-presets(); } }
+                    StudioButton { width: 190px; primary: true; label: "Exportar Animaciones"; clicked => { root.export-project-action(); } }
+                    StudioButton { width: 195px; label: "Exportar Tira PNG (6 frames)"; clicked => { root.export-strip-png-action(); } }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+
+        // ==================== TAB 3: AJUSTES ====================
+        if root.main-tab == 3 : PanelCard {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 20px; spacing: 12px; alignment: start;
+                Text { text: "Rendimiento y Motor Gráfico Nativo"; color: #ffffff; font-size: 16px; font-weight: 700; }
+                Text { text: "Backend GPU activo: " + root.gpu-adapter-name + " (4x MSAA + Zero-Copy wgpu)"; color: Theme.green; font-size: 12.5px; }
+                HorizontalLayout {
+                    spacing: 16px;
+                    StudioCheckbox { label: "Sombras 3D en tiempo real"; checked: root.shadows-enabled; toggled(v) => { root.toggle-shadows(v); } }
+                    StudioCheckbox { label: "Papel Cebolla entre keyframes"; checked: root.onion-enabled; toggled(v) => { root.toggle-onion(v); } }
+                    StudioCheckbox { label: "Estela de corte 3D"; checked: root.trail-enabled; toggled(v) => { root.toggle-trail(v); } }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+    } // end root-focus
+
+    // Floating Toast Banner
+    if root.toast-visible : Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 54px;
+        width: 440px;
+        height: 34px;
+        border-radius: 8px;
+        background: #1a1530f0;
+        border-width: 1px;
+        border-color: Theme.accent-bright;
+        Text {
+            text: root.toast-message;
+            color: #f3e8ff;
+            font-size: 11.5px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
