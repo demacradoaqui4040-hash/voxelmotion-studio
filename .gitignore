@@ -5,6 +5,7 @@
 
 # Local user project state & generated exports
 /project.json
+/profile.local.json
 /exports/
 
 # OS & editor files

@@ -1,29 +1,65 @@
-// VoxelMotion Studio - Design System Palette matching dark neon-violet studio theme
+// VoxelMotion Studio v2 - Data-Driven DesignSpec Tokens (5 Hero Artistic Directions)
+// All values are pushed once per theme switch from src/design_spec.rs — zero conditional ternary bloat.
 
 export global Theme {
-    out property <color> bg-shell: #09080f;
-    out property <color> bg-header: #100e1c;
-    out property <color> bg-panel: #131120;
-    out property <color> bg-card: #181629;
-    out property <color> bg-input: #0e0d18;
-    out property <color> bg-hover: #211d38;
+    out property <string> font-ui: "Plus Jakarta Sans";
+    out property <string> font-mono: "JetBrains Mono";
 
-    out property <color> border-subtle: #25213d;
-    out property <color> border-glow: #7c3aed;
-    out property <color> border-soft: #2e294a;
+    // Fixed 4-Level Typographic Hierarchy (DEC-10)
+    out property <length> fs-title: 13px;
+    out property <length> fs-body: 12px;
+    out property <length> fs-mono: 11px;
+    out property <length> fs-meta: 10px;
 
-    out property <color> accent: #7c3aed;
-    out property <color> accent-bright: #9f67ff;
-    out property <color> accent-soft: #7c3aed33;
-    out property <color> accent-pill: #6d28d9;
+    in-out property <int> theme-idx: 0;
+    in-out property <bool> motion-enabled: true;
 
-    out property <color> text-primary: #f1f0fa;
-    out property <color> text-secondary: #9d98bd;
-    out property <color> text-dim: #666184;
+    out property <duration> dur-effects: root.motion-enabled ? 75ms : 0ms;
+    out property <duration> dur-spatial: root.motion-enabled ? 175ms : 0ms;
 
-    out property <color> axis-x: #f43f5e;
-    out property <color> axis-y: #22c55e;
-    out property <color> axis-z: #3b82f6;
-    out property <color> gold: #f59e0b;
-    out property <color> green: #10b981;
+    // Structural & Material Tokens (driven by DesignSpec)
+    in-out property <length> radius-control: 6px;
+    in-out property <length> radius-overlay: 10px;
+    in-out property <length> border-control-w: 1px;
+    in-out property <bool> topbar-divider: false;
+    in-out property <bool> switch-pill: true;
+    in-out property <bool> wireframe-controls: false;
+    in-out property <bool> mono-headers: false;
+
+    // 3-Tone Continuous Surface Ladder
+    in-out property <color> bg-shell: #121316;
+    in-out property <color> bg-sidebar: #18191d;
+    in-out property <color> bg-elevated: #22242a;
+    in-out property <color> bg-input: #101114;
+    in-out property <color> bg-hover: #ffffff10;
+    in-out property <color> bg-active: #ffffff1c;
+    in-out property <color> bg-popover: #1c1d22f4;
+    in-out property <color> bg-toast: #1c1d22f4;
+    in-out property <color> bg-toggle-off: #2d3038;
+    in-out property <color> bg-ruler: #15161a;
+    in-out property <color> bg-guide: #24262d;
+
+    // Hairlines & Borders
+    in-out property <color> divider: #ffffff13;
+    in-out property <color> border-control: #ffffff18;
+    in-out property <color> border-specular: #ffffff24;
+
+    // Accent (strictly reserved for primary actions, Play/Pause, Playhead, Active Toggle)
+    in-out property <color> accent: #0a84ff;
+    in-out property <color> accent-hover: #2894ff;
+    in-out property <color> accent-press: #006be0;
+    in-out property <color> accent-soft: #0a84ff26;
+    in-out property <color> accent-text: #93c5fd;
+
+    // Typography Polarity
+    in-out property <color> text-primary: #f2f3f7;
+    in-out property <color> text-secondary: #9fa4af;
+    in-out property <color> text-dim: #696e79;
+
+    // Semantic Signals
+    in-out property <color> axis-x: #ff453a;
+    in-out property <color> axis-y: #30d158;
+    in-out property <color> axis-z: #0a84ff;
+    in-out property <color> gold: #ffd60a;
+    in-out property <color> green: #30d158;
 }

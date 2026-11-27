@@ -1,6 +1,6 @@
 [package]
 name = "voxelmotion-studio"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 license = "MIT"
 description = "VoxelMotion Studio - Native GPU 3D Voxel Keyframe Animation Studio (Rust + Slint + wgpu DX12/Vulkan)"

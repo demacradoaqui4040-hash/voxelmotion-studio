@@ -1,10 +1,11 @@
 // VoxelMotion Studio - Procedural Starter Weapons & Runtime Asset Importer (.png / .jar / .zip)
 
-use crate::model::{WeaponCategory, WeaponRecord};
+use crate::model::{SpritePixels, WeaponCategory, WeaponRecord};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 use zip::ZipArchive;
 
 /// Generate a crisp 32x32 pixel-art Katana sprite procedurally.
@@ -170,67 +171,112 @@ fn prettify_slug(slug: &str) -> String {
 fn classify_weapon(slug: &str, parent: &str) -> (WeaponCategory, &'static str, &'static str) {
     let s = slug.to_lowercase();
     let p = parent.to_lowercase();
-    if s.contains("katana") || p.contains("katana") {
-        (WeaponCategory::Katanas, "MEDIUM", "katana")
-    } else if s.contains("musket")
+    if s.contains("musket")
         || s.contains("pistol")
         || s.contains("blunderbuss")
+        || s.contains("flintlock")
         || s.contains("rifle")
-        || s.contains("bow")
+        || s.contains("gatling")
     {
-        (WeaponCategory::Arcos, "RANGED", if s.contains("bow") { "arc" } else { "ranged" })
+        (WeaponCategory::Fuego, "RANGED", "ranged")
+    } else if s.contains("bow") || s.contains("crossbow") || s.contains("blowgun") {
+        (WeaponCategory::Arcos, "RANGED", "arc")
+    } else if s.contains("shield") || s.contains("targe") || s.contains("bulwark_of_the_flame") {
+        (WeaponCategory::Escudos, "HEAVY", "heavy")
+    } else if s.contains("gauntlet")
+        || s.contains("fist")
+        || s.contains("tidal_claws")
+        || s.contains("haki_fists")
+        || p.contains("fist")
+    {
+        (WeaponCategory::Punos, "UNARMED", "dagger")
+    } else if s.contains("katana") || p.contains("katana") {
+        (WeaponCategory::Katanas, "MEDIUM", "katana")
+    } else if s.contains("greataxe")
+        || s.contains("greathammer")
+        || s.contains("hammer")
+        || s.contains("mace")
+        || s.contains("axe")
+        || s.contains("anchor")
+        || s.contains("forge")
+        || s.contains("annihilator")
+        || s.contains("ceraunus")
+        || s.contains("mjolnir")
+        || s.contains("frostfall")
+        || p.contains("heavy_axe")
+        || p.contains("double_axe")
+        || p.contains("hammer")
+        || p.contains("mace")
+        || p.contains("anchor")
+    {
+        (WeaponCategory::Hachas, "HEAVY", "heavy")
+    } else if s.contains("claymore")
+        || s.contains("greatsword")
+        || s.contains("cleaver")
+        || s.contains("incinerator")
+        || s.contains("shredder")
+        || p.contains("claymore")
+    {
+        (WeaponCategory::Mandobles, "HEAVY", "heavy")
     } else if s.contains("spear")
         || s.contains("halberd")
         || s.contains("glaive")
         || s.contains("lance")
         || s.contains("trident")
+        || s.contains("bardiche")
+        || s.contains("scythe")
+        || s.contains("battlestaff")
+        || s.contains("warglaive")
+        || s.contains("staff")
+        || s.contains("twin_blade")
         || p.contains("spear")
         || p.contains("halberd")
         || p.contains("glaive")
         || p.contains("trident")
+        || p.contains("scythe")
+        || p.contains("battlestaff")
     {
         (WeaponCategory::Lanzas, "HEAVY", "polearm")
     } else if s.contains("dagger")
+        || s.contains("knife")
         || s.contains("sai")
         || s.contains("rapier")
         || s.contains("athame")
+        || s.contains("sickle")
+        || s.contains("chakram")
+        || s.contains("estoc")
         || s.contains("claw")
         || p.contains("dagger")
         || p.contains("rapier")
         || p.contains("soul_knife")
+        || p.contains("sickle")
     {
         (WeaponCategory::Dagas, "LIGHT", "dagger")
-    } else if s.contains("claymore")
-        || s.contains("greatsword")
-        || s.contains("greataxe")
-        || s.contains("greathammer")
-        || s.contains("hammer")
-        || s.contains("axe")
-        || p.contains("claymore")
-        || p.contains("heavy_axe")
-        || p.contains("hammer")
-    {
-        (WeaponCategory::Mandobles, "HEAVY", "heavy")
     } else if s.contains("sword")
         || s.contains("cutlass")
         || s.contains("blade")
         || s.contains("saber")
         || p.contains("sword")
         || p.contains("cutlass")
+        || p.contains("coral_blade")
     {
         (WeaponCategory::Espadas, "MEDIUM", "sword")
     } else {
-        (WeaponCategory::Otros, "MEDIUM", "sword")
+        (WeaponCategory::Espadas, "MEDIUM", "sword")
     }
 }
 
-fn decode_png_top_frame(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+pub fn decode_png_top_frame(bytes: &[u8]) -> Option<Arc<SpritePixels>> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     let frame_h = w.min(h).max(1);
     let mut raw = img.into_raw();
     raw.truncate((w * frame_h * 4) as usize);
-    Some((w, frame_h, raw))
+    Some(SpritePixels::new(w, frame_h, raw))
+}
+
+fn sprite_arc((w, h, rgba): (u32, u32, Vec<u8>)) -> Arc<SpritePixels> {
+    SpritePixels::new(w, h, rgba)
 }
 
 /// Pure-procedural starter voxel weapon library requiring zero external mod files.
@@ -244,7 +290,9 @@ pub fn build_starter_weapons() -> Vec<WeaponRecord> {
             category: WeaponCategory::Espadas,
             weapon_class: "MEDIUM".into(),
             mesh_archetype: "sword".into(),
-            icon_rgba: Some(make_archetype_sprite("sword", [175, 205, 232])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("sword", [175, 205, 232]))),
         },
         WeaponRecord {
             id: "starter:classic_katana".into(),
@@ -254,7 +302,9 @@ pub fn build_starter_weapons() -> Vec<WeaponRecord> {
             category: WeaponCategory::Katanas,
             weapon_class: "MEDIUM".into(),
             mesh_archetype: "katana".into(),
-            icon_rgba: Some(make_classic_katana_sprite()),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_classic_katana_sprite())),
         },
         WeaponRecord {
             id: "starter:heavy_claymore".into(),
@@ -264,7 +314,9 @@ pub fn build_starter_weapons() -> Vec<WeaponRecord> {
             category: WeaponCategory::Mandobles,
             weapon_class: "HEAVY".into(),
             mesh_archetype: "heavy".into(),
-            icon_rgba: Some(make_archetype_sprite("heavy", [148, 128, 210])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("heavy", [148, 128, 210]))),
         },
         WeaponRecord {
             id: "starter:battle_halberd".into(),
@@ -274,7 +326,9 @@ pub fn build_starter_weapons() -> Vec<WeaponRecord> {
             category: WeaponCategory::Lanzas,
             weapon_class: "HEAVY".into(),
             mesh_archetype: "polearm".into(),
-            icon_rgba: Some(make_archetype_sprite("polearm", [198, 210, 224])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("polearm", [198, 210, 224]))),
         },
         WeaponRecord {
             id: "starter:shadow_dagger".into(),
@@ -284,17 +338,21 @@ pub fn build_starter_weapons() -> Vec<WeaponRecord> {
             category: WeaponCategory::Dagas,
             weapon_class: "LIGHT".into(),
             mesh_archetype: "dagger".into(),
-            icon_rgba: Some(make_archetype_sprite("dagger", [185, 225, 238])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("dagger", [185, 225, 238]))),
         },
         WeaponRecord {
             id: "starter:flintlock".into(),
             name: "Mosquete Clásico".into(),
             mod_source: "VoxelMotion".into(),
             item_id: "voxelmotion:flintlock".into(),
-            category: WeaponCategory::Arcos,
+            category: WeaponCategory::Fuego,
             weapon_class: "RANGED".into(),
             mesh_archetype: "ranged".into(),
-            icon_rgba: Some(make_archetype_sprite("ranged", [160, 175, 195])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("ranged", [160, 175, 195]))),
         },
         WeaponRecord {
             id: "starter:hunter_bow".into(),
@@ -304,17 +362,21 @@ pub fn build_starter_weapons() -> Vec<WeaponRecord> {
             category: WeaponCategory::Arcos,
             weapon_class: "RANGED".into(),
             mesh_archetype: "arc".into(),
-            icon_rgba: Some(make_archetype_sprite("arc", [190, 145, 92])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("arc", [190, 145, 92]))),
         },
         WeaponRecord {
             id: "starter:unarmed".into(),
             name: "Sin Arma (Rig Base)".into(),
             mod_source: "Rig Base".into(),
             item_id: "minecraft:air".into(),
-            category: WeaponCategory::Otros,
+            category: WeaponCategory::Punos,
             weapon_class: "UNARMED".into(),
             mesh_archetype: "dagger".into(),
-            icon_rgba: Some(make_archetype_sprite("dagger", [210, 140, 180])),
+            status: crate::model::CurationStatus::Pendiente,
+            bc_archetype: String::new(),
+            icon_rgba: Some(sprite_arc(make_archetype_sprite("dagger", [210, 140, 180]))),
         },
     ]
 }
@@ -333,7 +395,7 @@ pub fn import_weapons_from_paths(paths: &[PathBuf]) -> Vec<WeaponRecord> {
 
         if ext == "png" {
             let Ok(bytes) = std::fs::read(path) else { continue };
-            let Some((w, h, raw)) = decode_png_top_frame(&bytes) else { continue };
+            let Some(sprite) = decode_png_top_frame(&bytes) else { continue };
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("custom_item");
             let slug = stem.to_ascii_lowercase().replace(' ', "_");
             let id = format!("custom:{slug}");
@@ -350,7 +412,9 @@ pub fn import_weapons_from_paths(paths: &[PathBuf]) -> Vec<WeaponRecord> {
                 category: cat,
                 weapon_class: wclass.into(),
                 mesh_archetype: arch.into(),
-                icon_rgba: Some((w, h, raw)),
+                status: crate::model::CurationStatus::Pendiente,
+                bc_archetype: String::new(),
+                icon_rgba: Some(sprite),
             });
         } else if ext == "jar" || ext == "zip" {
             let Ok(file) = File::open(path) else { continue };
@@ -423,6 +487,8 @@ pub fn import_weapons_from_paths(paths: &[PathBuf]) -> Vec<WeaponRecord> {
                     category: cat,
                     weapon_class: wclass.into(),
                     mesh_archetype: arch.into(),
+                    status: crate::model::CurationStatus::Pendiente,
+                    bc_archetype: parent.to_string(),
                     icon_rgba,
                 });
             }

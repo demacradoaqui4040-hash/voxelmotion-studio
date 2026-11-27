@@ -185,51 +185,139 @@ pub fn build_character_bone_meshes() -> [MeshData; 7] {
     [waist, body, head, right_arm, left_arm, right_leg, left_leg]
 }
 
-/// Build the atmospheric stylized Sakura Temple World Backdrop for "Vista Previa en Juego".
+/// Build a vibrant Minecraft-voxel Sakura Dojo Courtyard & Pier Arena for "Vista Previa en Juego".
 pub fn build_sakura_world_mesh() -> MeshData {
     let mut m = MeshData::new();
 
-    // Stone wet temple courtyard floor slabs
-    m.push_box([-14.0, -0.20, -14.0, 14.0, -0.002, 14.0], [0.15, 0.16, 0.22]);
-    // Center cobblestone runner blocks
-    for i in -5..=5 {
-        let z = i as f32 * 1.4;
-        m.push_box([-1.6, -0.001, z - 0.6, 1.6, 0.015, z + 0.6], [0.21, 0.22, 0.29]);
+    // Raised stone foundation under the courtyard island
+    m.push_box([-7.5, -0.35, -7.5, 7.5, -0.02, 7.5], [0.16, 0.17, 0.22]);
+
+    // Lush emerald moss-grass perimeter surround
+    for gx in -7i32..7 {
+        for gz in -7i32..7 {
+            if (-4..4).contains(&gx) && (-4..4).contains(&gz) {
+                continue;
+            }
+            let x0 = gx as f32;
+            let z0 = gz as f32;
+            let checker = (gx + gz).rem_euclid(2) == 0;
+            let grass_top = if checker { [0.22, 0.52, 0.30] } else { [0.19, 0.46, 0.27] };
+            m.push_box([x0, -0.02, z0, x0 + 0.98, 0.01, z0 + 0.98], grass_top);
+        }
     }
-    // Stone border curbs
-    m.push_box([-14.0, -0.01, -9.0, 14.0, 0.45, -8.3], [0.22, 0.21, 0.27]);
 
-    // Japanese Pagoda / Temple silhouette behind the player (-Z background)
-    m.push_box([-3.6, 0.0, -11.5, 3.6, 2.6, -7.2], [0.14, 0.11, 0.15]);
-    m.push_box([-4.4, 2.5, -12.1, 4.4, 3.0, -6.7], [0.09, 0.08, 0.13]); // eave 1
-    m.push_box([-2.7, 3.0, -10.8, 2.7, 4.9, -7.7], [0.16, 0.13, 0.18]);
-    m.push_box([-3.4, 4.8, -11.3, 3.4, 5.25, -7.3], [0.09, 0.08, 0.13]); // eave 2
-    m.push_box([-0.25, 5.25, -9.6, 0.25, 6.4, -9.1], [0.85, 0.68, 0.30]); // golden finial
-    // Warm glowing temple shoji doors & lanterns
-    m.push_box([-1.2, 0.3, -7.25, 1.2, 2.1, -7.15], [0.95, 0.68, 0.34]);
-    m.push_box([-3.1, 0.6, -7.25, -2.3, 1.8, -7.15], [0.92, 0.62, 0.30]);
-    m.push_box([2.3, 0.6, -7.25, 3.1, 1.8, -7.15], [0.92, 0.62, 0.30]);
+    // Crisp tiled Dojo Stone Courtyard (`[-4..4]` meters with combat timber center walkway)
+    for tx in -4i32..4 {
+        for tz in -4i32..4 {
+            let x0 = tx as f32;
+            let z0 = tz as f32;
+            let is_bridge = (-1..1).contains(&tx) && (-2..3).contains(&tz);
+            let col = if is_bridge {
+                if (tx + tz).rem_euclid(2) == 0 {
+                    [0.44, 0.30, 0.20] // cherry-oak combat plank A
+                } else {
+                    [0.38, 0.25, 0.17] // cherry-oak combat plank B
+                }
+            } else if (tx + tz).rem_euclid(2) == 0 {
+                [0.28, 0.30, 0.38] // polished stone slate
+            } else {
+                [0.23, 0.25, 0.32]
+            };
+            m.push_box([x0 + 0.02, -0.005, z0 + 0.02, x0 + 0.98, 0.015, z0 + 0.98], col);
+        }
+    }
 
-    // Iconic Sakura Cherry-Blossom trees left & right
+    // Carved courtyard edge curbs + corner mossy accent blocks
+    m.push_box([-4.2, -0.01, -4.2, 4.2, 0.12, -3.95], [0.34, 0.36, 0.44]);
+    m.push_box([-4.2, -0.01, 3.95, 4.2, 0.12, 4.2], [0.34, 0.36, 0.44]);
+    m.push_box([-4.2, -0.01, -4.0, -3.95, 0.12, 4.0], [0.34, 0.36, 0.44]);
+    m.push_box([3.95, -0.01, -4.0, 4.2, 0.12, 4.0], [0.34, 0.36, 0.44]);
+
+    // Japanese Pagoda / Dojo Shrine behind the player (-Z background)
+    m.push_box([-3.8, 0.0, -10.8, 3.8, 0.35, -6.5], [0.24, 0.25, 0.31]); // stone plinth
+    m.push_box([-3.3, 0.35, -10.4, 3.3, 2.7, -6.9], [0.20, 0.13, 0.16]); // lower timber wall
+    m.push_box([-4.3, 2.65, -11.2, 4.3, 3.05, -6.2], [0.11, 0.10, 0.16]); // eave 1
+    m.push_box([-4.6, 2.95, -11.5, 4.6, 3.16, -5.9], [0.15, 0.14, 0.22]); // upturned rim
+    m.push_box([-2.4, 3.15, -9.8, 2.4, 5.0, -7.2], [0.22, 0.15, 0.19]); // upper tier
+    m.push_box([-3.3, 4.9, -10.5, 3.3, 5.32, -6.6], [0.11, 0.10, 0.16]); // eave 2
+    m.push_box([-0.22, 5.32, -8.75, 0.22, 6.55, -8.3], [0.95, 0.76, 0.34]); // golden spire
+    // Warm glowing shoji doors & windows
+    m.push_box([-1.15, 0.4, -6.94, 1.15, 2.25, -6.82], [1.0, 0.78, 0.40]);
+    m.push_box([-2.8, 0.7, -6.94, -2.0, 1.9, -6.82], [0.98, 0.70, 0.34]);
+    m.push_box([2.0, 0.7, -6.94, 2.8, 1.9, -6.82], [0.98, 0.70, 0.34]);
+
+    // Ornate Vermilion Torii Gate + Flanking Stone Toro Lanterns
+    m.push_box([-2.15, 0.0, -4.6, -1.80, 2.7, -4.25], [0.76, 0.20, 0.22]);
+    m.push_box([1.80, 0.0, -4.6, 2.15, 2.7, -4.25], [0.76, 0.20, 0.22]);
+    m.push_box([-2.75, 2.52, -4.72, 2.75, 2.82, -4.15], [0.84, 0.22, 0.24]);
+    m.push_box([-2.95, 2.80, -4.78, 2.95, 2.96, -4.08], [0.14, 0.13, 0.20]);
+    m.push_box([-2.4, 2.08, -4.55, 2.4, 2.28, -4.30], [0.72, 0.19, 0.21]);
+
+    for lx in [-2.65f32, 2.65f32] {
+        let lz = -3.1f32;
+        m.push_box([lx - 0.24, 0.0, lz - 0.24, lx + 0.24, 0.78, lz + 0.24], [0.34, 0.36, 0.42]);
+        m.push_box([lx - 0.20, 0.78, lz - 0.20, lx + 0.20, 1.18, lz + 0.20], [1.0, 0.82, 0.38]); // warm lantern core
+        m.push_box([lx - 0.34, 1.18, lz - 0.34, lx + 0.34, 1.38, lz + 0.34], [0.22, 0.24, 0.30]);
+    }
+
+    // Multi-tone Voxel Sakura Trees + Floating Blossom Petals
     let trees = [
-        (-4.6f32, -5.8f32, 1.0f32),
-        (5.0, -6.2, 1.05),
-        (-7.4, -9.2, 1.2),
-        (7.8, -9.0, 1.15),
+        (-4.7f32, -5.0f32, 1.05f32),
+        (4.8, -4.8, 1.1),
+        (-5.6, 1.8, 0.95),
+        (5.6, 2.2, 1.0),
     ];
     for (tx, tz, sc) in trees {
-        // Dark twisted trunk
-        m.push_box([tx - 0.32 * sc, 0.0, tz - 0.32 * sc, tx + 0.32 * sc, 2.5 * sc, tz + 0.32 * sc], [0.18, 0.12, 0.13]);
-        // Lush layered pink sakura canopies
-        m.push_box([tx - 1.9 * sc, 2.2 * sc, tz - 1.7 * sc, tx + 1.9 * sc, 3.4 * sc, tz + 1.7 * sc], [0.86, 0.44, 0.66]);
-        m.push_box([tx - 1.4 * sc, 3.3 * sc, tz - 1.3 * sc, tx + 1.4 * sc, 4.2 * sc, tz + 1.3 * sc], [0.94, 0.56, 0.76]);
-        m.push_box([tx - 2.3 * sc, 1.9 * sc, tz - 1.1 * sc, tx - 0.8 * sc, 2.9 * sc, tz + 1.1 * sc], [0.78, 0.38, 0.60]);
+        m.push_box([tx - 0.32 * sc, 0.0, tz - 0.32 * sc, tx + 0.32 * sc, 2.5 * sc, tz + 0.32 * sc], [0.24, 0.14, 0.16]);
+        m.push_box([tx - 0.24 * sc, 2.2 * sc, tz - 0.24 * sc, tx + 0.8 * sc, 3.0 * sc, tz + 0.24 * sc], [0.24, 0.14, 0.16]);
+        m.push_box([tx - 1.9 * sc, 2.2 * sc, tz - 1.7 * sc, tx + 1.9 * sc, 3.3 * sc, tz + 1.7 * sc], [0.80, 0.34, 0.58]);
+        m.push_box([tx - 1.5 * sc, 3.2 * sc, tz - 1.4 * sc, tx + 1.5 * sc, 4.1 * sc, tz + 1.4 * sc], [0.95, 0.54, 0.76]);
+        m.push_box([tx - 0.9 * sc, 3.9 * sc, tz - 0.9 * sc, tx + 1.1 * sc, 4.55 * sc, tz + 0.9 * sc], [1.0, 0.72, 0.88]);
     }
 
-    // Wooden torii pillars in mid-distance
-    m.push_box([-2.2, 0.0, -5.6, -1.9, 2.6, -5.3], [0.58, 0.18, 0.24]);
-    m.push_box([1.9, 0.0, -5.6, 2.2, 2.6, -5.3], [0.58, 0.18, 0.24]);
-    m.push_box([-2.7, 2.45, -5.7, 2.7, 2.72, -5.2], [0.64, 0.20, 0.26]);
+    // Subtle suspended sakura blossom petals framing the courtyard
+    for (px, py, pz) in [
+        (-1.8f32, 1.85f32, -1.6f32),
+        (1.9, 2.15, -1.2),
+        (-2.4, 1.35, 0.9),
+        (2.3, 1.60, 1.4),
+        (0.9, 2.35, -2.5),
+        (-1.1, 2.45, 2.1),
+    ] {
+        m.push_box([px, py, pz, px + 0.09, py + 0.05, pz + 0.09], [1.0, 0.70, 0.86]);
+    }
 
+    m
+}
+
+/// Stylized Minecraft-voxel Dojo Training Dummy standing at melee strike distance for live hit feedback.
+pub fn build_training_dummy_mesh() -> MeshData {
+    let mut m = MeshData::new();
+    // Crossed oak beam base + collar brace
+    m.push_box([-0.38, 0.0, -0.10, 0.38, 0.08, 0.10], [0.30, 0.20, 0.14]);
+    m.push_box([-0.10, 0.0, -0.38, 0.10, 0.08, 0.38], [0.30, 0.20, 0.14]);
+    m.push_box([-0.15, 0.08, -0.15, 0.15, 0.16, 0.15], [0.24, 0.25, 0.30]);
+    // Main oak stand post + iron reinforcement ring
+    m.push_box([-0.075, 0.16, -0.075, 0.075, 1.44, 0.075], [0.38, 0.26, 0.17]);
+    m.push_box([-0.095, 0.56, -0.095, 0.095, 0.64, 0.095], [0.20, 0.21, 0.26]);
+    // Crossbeam arms + rope cuffs
+    m.push_box([-0.46, 1.15, -0.06, 0.46, 1.29, 0.06], [0.42, 0.28, 0.18]);
+    m.push_box([-0.44, 1.14, -0.075, -0.34, 1.30, 0.075], [0.70, 0.56, 0.30]);
+    m.push_box([0.34, 1.14, -0.075, 0.44, 1.30, 0.075], [0.70, 0.56, 0.30]);
+    // Woven straw barrel torso + oak stave ribs
+    m.push_box([-0.23, 0.68, -0.165, 0.23, 1.36, 0.165], [0.74, 0.58, 0.31]);
+    m.push_box([-0.24, 0.68, -0.175, -0.17, 1.36, 0.175], [0.48, 0.34, 0.20]);
+    m.push_box([0.17, 0.68, -0.175, 0.24, 1.36, 0.175], [0.48, 0.34, 0.20]);
+    // Crimson dojo waist sash + cream & scarlet chest target emblem facing player (-Z)
+    m.push_box([-0.245, 0.80, -0.18, 0.245, 0.94, 0.18], [0.78, 0.18, 0.24]);
+    m.push_box([-0.14, 1.00, -0.18, 0.14, 1.28, -0.15], [0.92, 0.88, 0.78]);
+    m.push_box([-0.08, 1.06, -0.19, 0.08, 1.22, -0.16], [0.86, 0.18, 0.22]);
+    // Carved dummy head + crimson hachimaki headband + straw kasa hat trim
+    m.push_box([-0.17, 1.40, -0.17, 0.17, 1.74, 0.17], [0.80, 0.66, 0.36]);
+    m.push_box([-0.18, 1.60, -0.18, 0.18, 1.67, 0.18], [0.82, 0.18, 0.24]);
+    m.push_box([-0.10, 1.50, -0.18, -0.04, 1.56, -0.16], [0.16, 0.13, 0.16]);
+    m.push_box([0.04, 1.50, -0.18, 0.10, 1.56, -0.16], [0.16, 0.13, 0.16]);
+    m.push_box([-0.27, 1.72, -0.27, 0.27, 1.79, 0.27], [0.64, 0.50, 0.26]);
+    m.push_box([-0.16, 1.79, -0.16, 0.16, 1.87, 0.16], [0.56, 0.43, 0.22]);
     m
 }

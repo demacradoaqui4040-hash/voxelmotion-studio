@@ -1,7 +1,6 @@
 // VoxelMotion Studio - Exact 3D Math matching Minecraft ModelPart kinematics 1:1
 
-use crate::model::{BoneTransform, ToolMode, BONE_NAMES};
-use std::collections::HashMap;
+use crate::model::{BoneTransform, RigPose, ToolMode, BONE_COUNT};
 
 pub const DEG2RAD: f32 = std::f32::consts::PI / 180.0;
 
@@ -470,20 +469,18 @@ fn bone_local(base_x: f32, base_y: f32, base_z: f32, p: &BoneTransform) -> Mat4 
 }
 
 /// Evaluate exact world matrices for all 8 bones matching standard virtual waist hierarchy.
-pub fn evaluate_rig_matrices(pose: &HashMap<String, BoneTransform>) -> [Mat4; 8] {
-    let get = |name: &str| pose.get(name).cloned().unwrap_or_default();
+pub fn evaluate_rig_matrices(pose: &RigPose) -> [Mat4; BONE_COUNT] {
     let root = mc_to_world();
 
-    let waist_mc = bone_local(0.0, 12.0, 0.0, &get("waist"));
-    let body_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, &get("body")));
-    let head_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, &get("head")));
-    let right_arm_mc = waist_mc.mul(bone_local(-5.0, -10.0, 0.0, &get("right_arm")));
-    let left_arm_mc = waist_mc.mul(bone_local(5.0, -10.0, 0.0, &get("left_arm")));
-    let right_leg_mc = bone_local(-1.9, 12.0, 0.0, &get("right_leg"));
-    let left_leg_mc = bone_local(1.9, 12.0, 0.0, &get("left_leg"));
+    let waist_mc = bone_local(0.0, 12.0, 0.0, pose.bone(0));
+    let body_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(1)));
+    let head_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(2)));
+    let right_arm_mc = waist_mc.mul(bone_local(-5.0, -10.0, 0.0, pose.bone(3)));
+    let left_arm_mc = waist_mc.mul(bone_local(5.0, -10.0, 0.0, pose.bone(4)));
+    let right_leg_mc = bone_local(-1.9, 12.0, 0.0, pose.bone(6));
+    let left_leg_mc = bone_local(1.9, 12.0, 0.0, pose.bone(7));
 
-    let item = get("right_item");
-    let right_item_mc = right_arm_mc.mul(bone_local(-1.0, 9.0, -2.0, &item));
+    let right_item_mc = right_arm_mc.mul(bone_local(-1.0, 9.0, -2.0, pose.bone(5)));
 
     [
         root.mul(waist_mc),
@@ -576,7 +573,6 @@ pub fn pick_bone_ray_point(
             best_idx = Some(idx);
         }
     }
-    let _ = BONE_NAMES;
     best_idx.map(|idx| (idx, p_near.add(dir.mul(best_t))))
 }
 

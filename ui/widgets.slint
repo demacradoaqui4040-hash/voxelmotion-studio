@@ -1,109 +1,163 @@
-// VoxelMotion Studio - Reusable Studio Widgets (Vector Icons, Neon Switches, Axis Badges)
+// VoxelMotion Studio v2 - Unified Lucide (1.5px) & Material-Aware Studio Widgets
+// Adapts geometry, borders, switch hardware shape, and typography polarity directly from Theme/DesignSpec.
 
 import { Theme } from "theme.slint";
 
-export component PanelCard inherits Rectangle {
-    background: Theme.bg-panel;
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: Theme.border-subtle;
-    clip: true;
+export component Hairline inherits Rectangle {
+    height: 1px;
+    background: Theme.divider;
 }
 
+export component VerticalHairline inherits Rectangle {
+    width: 1px;
+    background: Theme.divider;
+}
+
+// Custom Geometric Isometric Cube + Motion Isotype (DEC-10)
+export component AppLogoMark inherits Rectangle {
+    in property <color> mark-color: Theme.text-primary;
+    width: 16px;
+    height: 16px;
+    background: transparent;
+
+    Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke: root.mark-color;
+        stroke-width: 1.6px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: "M12 2.5 L20 7.1 V16.9 L12 21.5 L4 16.9 V7.1 L12 2.5 Z M4.2 7.2 L12 11.7 L19.8 7.2 M12 11.7 V21.3";
+    }
+}
+
+// Unified Lucide 24x24 (1.5px stroke) Vector Icon Primitive
 export component VectorIcon inherits Path {
     in property <color> icon-color: Theme.text-secondary;
-    width: 14px;
-    height: 14px;
+    in property <length> size: 15px;
+    width: root.size;
+    height: root.size;
     viewbox-width: 24;
     viewbox-height: 24;
     fill: transparent;
     stroke: root.icon-color;
-    stroke-width: 2px;
+    stroke-width: 1.65px;
     stroke-line-cap: round;
     stroke-line-join: round;
+    animate stroke { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 }
 
-export component NeonToggle inherits TouchArea {
+// Material-aware Switch: Organic Pill in Pro/Daylight/Clay vs Sharp Mechanical Lever in Hardware/CAD
+export component StudioSwitch inherits TouchArea {
     in property <bool> checked: false;
     callback toggled(bool);
-    width: 36px;
-    height: 19px;
+    width: 34px;
+    height: Theme.switch-pill ? 20px : 18px;
     mouse-cursor: pointer;
 
     Rectangle {
         width: parent.width;
         height: parent.height;
-        border-radius: 10px;
-        background: root.checked ? @linear-gradient(90deg, #6d28d9, #9333ea) : #232038;
+        border-radius: Theme.switch-pill ? 10px : Theme.radius-control;
+        background: root.checked ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.accent)
+                                 : (Theme.wireframe-controls ? transparent : Theme.bg-toggle-off);
         border-width: 1px;
-        border-color: root.checked ? #a855f7 : Theme.border-soft;
-        animate background { duration: 140ms; }
+        border-color: root.checked ? Theme.accent : Theme.border-control;
+        animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 
         Rectangle {
             x: root.checked ? parent.width - self.width - 2px : 2px;
             y: 2px;
-            width: 13px;
-            height: 13px;
-            border-radius: 7px;
-            background: #ffffff;
-            animate x { duration: 140ms; easing: ease-out; }
+            width: Theme.switch-pill ? 16px : 12px;
+            height: parent.height - 4px;
+            border-radius: Theme.switch-pill ? 8px : Theme.radius-control;
+            background: root.checked && Theme.wireframe-controls ? Theme.accent : #ffffff;
+            animate x { duration: Theme.dur-spatial; easing: spring(0.18); }
         }
     }
 
     clicked => { root.toggled(!root.checked); }
 }
 
+// Clean Material-Aware Button (Ghost-Until-Hover or Surface/Wireframe/Primary)
 export component StudioButton inherits TouchArea {
     in property <string> label;
     in property <bool> active: false;
     in property <bool> primary: false;
     in property <bool> compact: false;
+    in property <bool> ghost: false;
+    in property <bool> mono: false;
+    in property <length> font-size: root.compact ? Theme.fs-meta : Theme.fs-body;
     mouse-cursor: pointer;
-    height: root.compact ? 24px : 29px;
+    height: root.compact ? 24px : 28px;
 
     Rectangle {
-        border-radius: 6px;
-        background: root.primary ?
-            @linear-gradient(90deg, #6d28d9, #8b5cf6) :
-            (root.active ? #2d2254 : (root.has-hover ? Theme.bg-hover : Theme.bg-card));
-        border-width: 1px;
-        border-color: root.primary ? #a78bfa : (root.active ? #7c3aed : Theme.border-subtle);
+        border-radius: Theme.radius-control;
+        background: root.primary
+            ? (root.pressed ? Theme.accent-press : (root.has-hover ? Theme.accent-hover : Theme.accent))
+            : (root.pressed ? Theme.bg-active
+                : (root.active ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
+                    : (root.has-hover ? Theme.bg-hover
+                        : (root.ghost || Theme.wireframe-controls ? transparent : Theme.bg-elevated))));
+        border-width: (root.ghost && !root.active && !root.has-hover && !root.primary) ? 0px : Theme.border-control-w;
+        border-color: root.primary ? Theme.accent
+                    : (root.active ? (Theme.wireframe-controls ? Theme.accent : Theme.border-specular) : Theme.border-control);
+        animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
+        animate border-color { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 
         Text {
             text: root.label;
-            color: root.primary ? #ffffff : (root.active ? #e9d5ff : Theme.text-primary);
-            font-size: root.compact ? 10.5px : 11.5px;
-            font-weight: root.primary ? 600 : 500;
+            color: root.primary ? #ffffff : (root.active || root.has-hover ? Theme.text-primary : Theme.text-secondary);
+            font-family: (root.mono || Theme.mono-headers) ? Theme.font-mono : Theme.font-ui;
+            font-size: root.font-size;
+            font-weight: (root.primary || root.active) ? 600 : 500;
             horizontal-alignment: center;
             vertical-alignment: center;
+            animate color { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
         }
     }
 }
 
-export component ToolRailBtn inherits TouchArea {
+// Compact Vector Icon Action Button (unified 24x24 Lucide grid, zero text clutter)
+export component IconActionBtn inherits TouchArea {
     in property <string> path-cmd;
-    in property <bool> filled: false;
     in property <bool> active: false;
-    width: 30px;
-    height: 30px;
-    mouse-cursor: pointer;
+    in property <bool> primary: false;
+    in property <bool> filled: false;
+    in property <bool> disabled: false;
+    in property <length> icon-size: 14px;
+    in property <length> optical-x: 0px;
+    width: 26px;
+    height: 26px;
+    mouse-cursor: root.disabled ? default : pointer;
 
     Rectangle {
-        border-radius: 7px;
-        background: root.active ? @linear-gradient(135deg, #6d28d9, #7c3aed) : (root.has-hover ? #241f3d : transparent);
-        border-width: 1px;
-        border-color: root.active ? #a78bfa : transparent;
+        border-radius: Theme.radius-control;
+        background: root.disabled ? transparent
+                  : (root.primary ? (root.pressed ? Theme.accent-press : (root.has-hover ? Theme.accent-hover : Theme.accent))
+                  : (root.pressed ? Theme.bg-active
+                  : (root.active ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
+                  : (root.has-hover ? Theme.bg-hover : transparent))));
+        border-width: (root.active || root.primary) ? 1px : 0px;
+        border-color: root.primary ? Theme.accent : (Theme.wireframe-controls ? Theme.accent : Theme.border-control);
+        animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 
         Path {
-            width: 15px;
-            height: 15px;
-            x: 7.5px;
-            y: 7.5px;
+            width: root.icon-size;
+            height: root.icon-size;
+            x: (parent.width - self.width) / 2 + root.optical-x;
+            y: (parent.height - self.height) / 2;
             viewbox-width: 24;
             viewbox-height: 24;
-            fill: root.filled ? (root.active ? #ffffff : Theme.text-secondary) : transparent;
-            stroke: root.filled ? transparent : (root.active ? #ffffff : Theme.text-secondary);
-            stroke-width: 2px;
+            fill: root.filled ? (root.primary ? #ffffff : (root.active ? Theme.text-primary : Theme.text-secondary)) : transparent;
+            stroke: root.filled ? transparent
+                  : (root.disabled ? Theme.text-dim
+                  : (root.primary ? #ffffff
+                  : (root.active || root.has-hover ? Theme.text-primary : Theme.text-secondary)));
+            stroke-width: 1.65px;
             stroke-line-cap: round;
             stroke-line-join: round;
             commands: root.path-cmd;
@@ -111,6 +165,87 @@ export component ToolRailBtn inherits TouchArea {
     }
 }
 
+export component ToolRailBtn inherits TouchArea {
+    in property <string> path-cmd;
+    in property <bool> active: false;
+    width: 28px;
+    height: 28px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        border-radius: Theme.radius-control;
+        background: root.pressed ? Theme.bg-active
+                  : (root.active ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
+                  : (root.has-hover ? Theme.bg-hover : transparent));
+        border-width: root.active ? 1px : 0px;
+        border-color: Theme.wireframe-controls ? Theme.accent : Theme.border-specular;
+        animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
+
+        Path {
+            width: 15px;
+            height: 15px;
+            x: 6.5px;
+            y: 6.5px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: transparent;
+            stroke: root.active || root.has-hover ? Theme.text-primary : Theme.text-secondary;
+            stroke-width: 1.65px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            commands: root.path-cmd;
+        }
+    }
+}
+
+// Native Windows 11 44x36px Geometric OS Caption Control (zero Unicode glyphs)
+export component WinChromeBtn inherits TouchArea {
+    in property <string> kind: "min"; // "min", "max", "restore", "close"
+    width: 44px;
+    height: 36px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        background: root.kind == "close"
+            ? (root.pressed ? #c42b1c : (root.has-hover ? #e81123 : transparent))
+            : (root.pressed ? Theme.bg-active : (root.has-hover ? Theme.bg-hover : transparent));
+        animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
+
+        if root.kind == "min" : Path {
+            width: 10px; height: 10px; x: 17px; y: 13px;
+            viewbox-width: 10; viewbox-height: 10;
+            stroke: root.has-hover ? Theme.text-primary : Theme.text-secondary;
+            stroke-width: 1.15px;
+            commands: "M1 5 H9";
+        }
+        if root.kind == "max" : Path {
+            width: 10px; height: 10px; x: 17px; y: 13px;
+            viewbox-width: 10; viewbox-height: 10;
+            fill: transparent;
+            stroke: root.has-hover ? Theme.text-primary : Theme.text-secondary;
+            stroke-width: 1.15px;
+            commands: "M1.5 1.5 H8.5 V8.5 H1.5 Z";
+        }
+        if root.kind == "restore" : Path {
+            width: 10px; height: 10px; x: 17px; y: 13px;
+            viewbox-width: 10; viewbox-height: 10;
+            fill: transparent;
+            stroke: root.has-hover ? Theme.text-primary : Theme.text-secondary;
+            stroke-width: 1.15px;
+            commands: "M1.5 3.2 H6.8 V8.5 H1.5 Z M3.2 3.2 V1.5 H8.5 V6.8 H6.8";
+        }
+        if root.kind == "close" : Path {
+            width: 10px; height: 10px; x: 17px; y: 13px;
+            viewbox-width: 10; viewbox-height: 10;
+            stroke: root.has-hover ? #ffffff : Theme.text-secondary;
+            stroke-width: 1.2px;
+            stroke-line-cap: round;
+            commands: "M1.5 1.5 L8.5 8.5 M8.5 1.5 L1.5 8.5";
+        }
+    }
+}
+
+// Flat Scrubbable Transform Cell (clean resting state, hover steppers)
 export component AxisCell inherits Rectangle {
     in property <string> axis: "X";
     in property <color> axis-color: Theme.axis-x;
@@ -121,15 +256,17 @@ export component AxisCell inherits Rectangle {
     callback reset-axis();
 
     height: 24px;
-    border-radius: 5px;
-    background: drag-ta.has-hover ? #19162b : Theme.bg-input;
+    border-radius: Theme.radius-control;
+    background: (drag-ta.has-hover || up-ta.has-hover || dn-ta.has-hover) ? Theme.bg-hover
+              : (Theme.wireframe-controls ? transparent : Theme.bg-input);
     border-width: 1px;
-    border-color: drag-ta.has-hover ? #4d3d85 : Theme.border-subtle;
+    border-color: (drag-ta.has-hover || up-ta.has-hover || dn-ta.has-hover) ? Theme.border-specular : Theme.border-control;
+    animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 
     HorizontalLayout {
-        padding-left: 5px;
+        padding-left: 6px;
         padding-right: 3px;
-        spacing: 2px;
+        spacing: 3px;
         alignment: space-between;
 
         drag-ta := TouchArea {
@@ -156,18 +293,28 @@ export component AxisCell inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 3px;
+                spacing: 4px;
+                Rectangle {
+                    width: 2.5px;
+                    height: 10px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 1px;
+                    background: root.axis-color;
+                }
                 Text {
                     text: root.axis;
-                    color: root.axis-color;
-                    font-size: 10px;
+                    color: Theme.text-secondary;
+                    font-family: Theme.mono-headers ? Theme.font-mono : Theme.font-ui;
+                    font-size: Theme.fs-meta;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
                 Text {
                     text: root.value-text;
                     color: Theme.text-primary;
-                    font-size: 10.5px;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-mono;
+                    font-weight: 500;
                     vertical-alignment: center;
                     horizontal-alignment: right;
                     horizontal-stretch: 1;
@@ -176,152 +323,38 @@ export component AxisCell inherits Rectangle {
         }
 
         VerticalLayout {
-            width: 11px;
+            width: 10px;
             alignment: center;
-            spacing: 0px;
+            spacing: 2px;
             up-ta := TouchArea {
-                height: 10px;
+                height: 8px;
                 mouse-cursor: pointer;
                 clicked => { root.step(1.0); }
-                Text { text: "▲"; font-size: 6px; color: up-ta.has-hover ? Theme.accent-bright : Theme.text-dim; vertical-alignment: center; horizontal-alignment: center; }
-            }
-            dn-ta := TouchArea {
-                height: 10px;
-                mouse-cursor: pointer;
-                clicked => { root.step(-1.0); }
-                Text { text: "▼"; font-size: 6px; color: dn-ta.has-hover ? Theme.accent-bright : Theme.text-dim; vertical-alignment: center; horizontal-alignment: center; }
-            }
-        }
-    }
-}
-
-export component StudioCheckbox inherits TouchArea {
-    in property <string> label;
-    in property <bool> checked: true;
-    callback toggled(bool);
-    height: 20px;
-    mouse-cursor: pointer;
-
-    HorizontalLayout {
-        spacing: 7px;
-        alignment: start;
-
-        Rectangle {
-            width: 14px;
-            height: 14px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 4px;
-            background: root.checked ? #7c3aed : Theme.bg-input;
-            border-width: 1px;
-            border-color: root.checked ? #a78bfa : Theme.border-soft;
-            if root.checked : Path {
-                width: 10px; height: 10px; x: 2px; y: 2px;
-                viewbox-width: 24; viewbox-height: 24;
-                fill: transparent;
-                stroke: #ffffff;
-                stroke-width: 3px;
-                stroke-line-cap: round;
-                stroke-line-join: round;
-                commands: "M5 13 L10 18 L19 7";
-            }
-        }
-
-        Text {
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
-    }
-
-    clicked => { root.toggled(!root.checked); }
-}
-
-// Vector transport control button (immune to missing Windows font glyphs like U+23F8)
-export component TransportIconBtn inherits TouchArea {
-    in property <string> kind: "play"; // "first", "last", "play", "pause"
-    in property <bool> primary: false;
-    width: 28px;
-    height: 22px;
-    mouse-cursor: pointer;
-
-    Rectangle {
-        border-radius: 5px;
-        background: root.primary ? (root.has-hover ? #8b5cf6 : Theme.accent)
-                  : (root.has-hover ? Theme.bg-hover : Theme.bg-input);
-        border-width: 1px;
-        border-color: root.primary ? #c4b5fd88 : Theme.border-subtle;
-
-        if root.kind == "play" : Path {
-            width: 11px; height: 11px;
-            x: (parent.width - self.width) / 2 + 1px;
-            y: (parent.height - self.height) / 2;
-            viewbox-width: 24; viewbox-height: 24;
-            fill: root.primary ? #ffffff : Theme.text-primary;
-            commands: "M7 5 L19 12 L7 19 Z";
-        }
-        if root.kind == "pause" : Path {
-            width: 11px; height: 11px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            viewbox-width: 24; viewbox-height: 24;
-            fill: #ffffff;
-            commands: "M6 5 H10 V19 H6 Z M14 5 H18 V19 H14 Z";
-        }
-        if root.kind == "first" : Path {
-            width: 11px; height: 11px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            viewbox-width: 24; viewbox-height: 24;
-            fill: Theme.text-primary;
-            commands: "M5 5 H8 V19 H5 Z M19 5 L10 12 L19 19 Z";
-        }
-        if root.kind == "last" : Path {
-            width: 11px; height: 11px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            viewbox-width: 24; viewbox-height: 24;
-            fill: Theme.text-primary;
-            commands: "M16 5 H19 V19 H16 Z M5 5 L14 12 L5 19 Z";
-        }
-    }
-}
-
-export component IconPrimaryButton inherits TouchArea {
-    in property <string> label;
-    in property <string> icon-commands: "M12 4 V15 M7 11 L12 16 L17 11 M5 19 H19";
-    height: 28px;
-    mouse-cursor: pointer;
-
-    Rectangle {
-        border-radius: 6px;
-        background: root.has-hover ? #8b5cf6 : Theme.accent;
-        border-width: 1px;
-        border-color: #c4b5fd88;
-
-        HorizontalLayout {
-            alignment: center;
-            spacing: 6px;
-            Rectangle {
-                width: 13px; height: 13px; y: (parent.height - self.height) / 2;
                 Path {
-                    width: 13px; height: 13px;
-                    viewbox-width: 24; viewbox-height: 24;
-                    fill: transparent;
-                    stroke: #ffffff;
-                    stroke-width: 2.2px;
-                    stroke-line-cap: round;
-                    stroke-line-join: round;
-                    commands: root.icon-commands;
+                    width: 6px; height: 4px; x: 2px; y: 2px;
+                    viewbox-width: 10; viewbox-height: 6;
+                    fill: up-ta.has-hover ? Theme.text-primary : Theme.text-dim;
+                    commands: "M5 0 L10 6 L0 6 Z";
                 }
             }
-            Text {
-                text: root.label;
-                color: #ffffff;
-                font-size: 11px;
-                font-weight: 600;
-                vertical-alignment: center;
+            dn-ta := TouchArea {
+                height: 8px;
+                mouse-cursor: pointer;
+                clicked => { root.step(-1.0); }
+                Path {
+                    width: 6px; height: 4px; x: 2px; y: 2px;
+                    viewbox-width: 10; viewbox-height: 6;
+                    fill: dn-ta.has-hover ? Theme.text-primary : Theme.text-dim;
+                    commands: "M0 0 L10 0 L5 6 Z";
+                }
             }
         }
     }
+}
+
+export component SectionLabel inherits Text {
+    color: Theme.text-dim;
+    font-family: Theme.mono-headers ? Theme.font-mono : Theme.font-ui;
+    font-size: Theme.fs-meta;
+    font-weight: 700;
 }
