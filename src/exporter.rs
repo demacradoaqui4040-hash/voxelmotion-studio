@@ -1,9 +1,10 @@
 // VoxelMotion Studio - Production Exporter (Bedrock 1.8.0 / GeckoLib 4.4.4 / Timings / PNG Strip)
 
 use crate::model::{
-    optimize_track_points, sample_clip_pose, AnimatorProject, ClipDef, CurationStatus, WeaponRecord,
-    BONE_NAMES,
+    optimize_track_points, sample_clip_pose, AnimatorProject, ClipDef, CurationStatus, BONE_NAMES,
 };
+#[cfg(test)]
+use crate::model::WeaponRecord;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -540,6 +541,7 @@ pub fn export_rell_seas_f3t(
 }
 
 /// Export the user's approved weapon shortlist (`curated_weapons_final.json`) inside `servernuevo/modpack/`.
+#[cfg(test)]
 pub fn export_curated_weapons_final(
     weapons: &[WeaponRecord],
     server_root: &Path,

@@ -1049,37 +1049,31 @@ fn rell_event_tag_for_clip(id: &str) -> Option<String> {
     }
 }
 
-fn is_punchy_combat_tool_file(path: &str) -> bool {
-    const ALLOWED: [&str; 8] = [
-        "actions-tool-sword.animation.json",
-        "actions-tool-axe.animation.json",
-        "actions-tool-mace.animation.json",
-        "actions-tool-spear.animation.json",
-        "actions-tool-trident.animation.json",
-        "actions-tool-bow.animation.json",
-        "actions-tool-crossbow.animation.json",
-        "actions-tool-shield.animation.json",
-    ];
-    let fname = path.rsplit('/').next().unwrap_or("");
-    ALLOWED.iter().any(|&a| a.eq_ignore_ascii_case(fname))
+fn should_keep_rell_clip(clip_id: &str) -> bool {
+    matches!(
+        clip_id,
+        "rellseas_attack_3"
+            | "rellseas_heavy_attack"
+            | "rellseas_block"
+            | "rellseas_parry"
+            | "rellseas_guard_break"
+            | "rellseas_execution"
+            | "rellseas_geppo_kick"
+            | "rellseas_dodge"
+    )
 }
 
-fn should_keep_punchy_clip(clip_id: &str) -> bool {
-    let low = clip_id.to_ascii_lowercase();
-    if low.contains("_add_") || low.contains("head_movement") || low.contains("mining") || low.contains("overtime") {
-        return false;
-    }
-    low.contains("attack")
-        || low.contains("slam")
-        || low.contains("lunge")
-        || low.contains("charge")
-        || low.contains("shoot")
-        || low.contains("throw")
-        || low.contains("block")
-        || low.contains("impact")
-        || low.contains("break")
-        || low == "spear"
-        || low.contains("loop")
+fn should_keep_bc_clip(stem: &str) -> bool {
+    matches!(
+        stem,
+        "two_handed_slash_horizontal_right"
+            | "two_handed_slash_horizontal_left"
+            | "two_handed_slash_vertical_right"
+            | "two_handed_spin"
+            | "dual_handed_slash_cross"
+            | "dual_handed_slash_uncross"
+            | "one_handed_uppercut_right"
+    )
 }
 
 fn normalize_categories(cats: Vec<WeaponCategory>) -> Vec<WeaponCategory> {
@@ -1103,28 +1097,7 @@ fn infer_rell_clip_categories(clip_id: &str) -> Vec<WeaponCategory> {
         "rellseas_block" | "rellseas_parry" | "rellseas_guard_break" | "rellseas_execution" => {
             WeaponCategory::MELEE_AND_SHIELD_FAMILIES.to_vec()
         }
-        _ => Vec::new(), // Universal (idle, walk, run, dodge, equip, unequip, geppo_kick)
-    }
-}
-
-fn infer_punchy_tool_categories(path: &str) -> Vec<WeaponCategory> {
-    let fname = path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
-    if fname.contains("tool-sword") {
-        vec![WeaponCategory::Espadas, WeaponCategory::Katanas]
-    } else if fname.contains("tool-axe") {
-        vec![WeaponCategory::Hachas, WeaponCategory::Mandobles]
-    } else if fname.contains("tool-mace") {
-        vec![WeaponCategory::Hachas]
-    } else if fname.contains("tool-spear") || fname.contains("tool-trident") {
-        vec![WeaponCategory::Lanzas]
-    } else if fname.contains("tool-bow") {
-        vec![WeaponCategory::Arcos]
-    } else if fname.contains("tool-crossbow") {
-        vec![WeaponCategory::Arcos, WeaponCategory::Fuego]
-    } else if fname.contains("tool-shield") {
-        vec![WeaponCategory::Escudos]
-    } else {
-        Vec::new()
+        _ => Vec::new(), // Universal (dodge, geppo_kick)
     }
 }
 
@@ -1232,6 +1205,10 @@ fn infer_bc_clip_categories(
             set.insert(WeaponCategory::Punos);
             set.insert(WeaponCategory::Escudos);
         }
+        "one_handed_uppercut_right" => {
+            set.insert(WeaponCategory::Punos);
+            set.insert(WeaponCategory::Dagas);
+        }
         "one_handed_swipe_horizontal_right" => {
             set.insert(WeaponCategory::Punos);
             set.insert(WeaponCategory::Dagas);
@@ -1255,41 +1232,7 @@ fn infer_bc_clip_categories(
     set.into_iter().collect()
 }
 
-fn infer_ss_clip_categories(
-    stem: &str,
-    anim_to_cats: &HashMap<String, BTreeSet<WeaponCategory>>,
-) -> Vec<WeaponCategory> {
-    let key = format!("simplyswords:{stem}");
-    if let Some(set) = anim_to_cats.get(&key) {
-        if !set.is_empty() {
-            return set.iter().copied().collect();
-        }
-    }
-    let low = stem.to_ascii_lowercase();
-    if low.contains("chakram") {
-        vec![WeaponCategory::Dagas, WeaponCategory::Hachas]
-    } else if low.contains("halberd")
-        || low.contains("polearm")
-        || low.contains("warglaive")
-        || low.contains("soulrender")
-    {
-        vec![WeaponCategory::Lanzas]
-    } else if low.contains("greatsword")
-        || low.contains("dragable")
-        || low.contains("whirlwind")
-        || low.contains("twilight")
-    {
-        vec![WeaponCategory::Mandobles]
-    } else if low.contains("greataxe") || low.contains("slam_reversed") {
-        vec![WeaponCategory::Mandobles, WeaponCategory::Hachas]
-    } else if low.contains("estoc") {
-        vec![WeaponCategory::Espadas, WeaponCategory::Dagas]
-    } else {
-        vec![WeaponCategory::Espadas]
-    }
-}
-
-/// Import all 5 combat animation families from `servernuevo`, strictly excluding ParCool and Punchy Moves locomotion.
+/// Import strictly the 15 combat animations that Punchy Moves (`Fluid & Foolish`) does not cover.
 pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) -> Vec<ClipDef> {
     let mut clips: Vec<ClipDef> = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -1351,11 +1294,14 @@ pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) ->
         }
     }
 
-    // 1. RELL Seas native clips (`15` clips) — Approved baseline unless user curated differently.
+    // 1. RELL Seas non-Punchy-Moves core mechanics & sword thrust (`8` clips).
     let rs_anim_path = combat_dir.join("rellseas_combat.animation.json");
     if let Ok(raw) = std::fs::read_to_string(&rs_anim_path) {
         if let Ok(parsed) = parse_bedrock_animation_json(&raw, ClipSource::RellSeas, CurationStatus::Aprobada) {
             for mut c in parsed {
+                if !should_keep_rell_clip(&c.id) {
+                    continue;
+                }
                 if let Some((dur, imp, lp)) = rell_timings.get(&c.id) {
                     c.duration = (*dur).max(0.15);
                     c.impact_time = *imp;
@@ -1374,20 +1320,52 @@ pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) ->
         }
     }
 
-    // 2. Better Combat (`30` PlayerAnimator attack animations).
+    // 2. Better Combat non-Punchy-Moves combo gaps (`7` clips covering 2H slash/spin, Dual, and Uppercut).
     if let Some(mut bc_zip) = open_zip(&mods_dir.join("bettercombat-forge-1.9.0+1.20.1.jar")) {
         let entries = sorted_zip_entries(&mut bc_zip, |n| {
             n.starts_with("assets/bettercombat/attack_animations/") && n.ends_with(".json")
         });
         for entry in entries {
-            let Some(raw) = read_zip_string(&mut bc_zip, &entry) else { continue };
             let stem = entry.rsplit('/').next().unwrap_or("").trim_end_matches(".json");
+            if !should_keep_bc_clip(stem) {
+                continue;
+            }
+            let Some(raw) = read_zip_string(&mut bc_zip, &entry) else { continue };
             let cid = format!("bc_{stem}");
-            let bc_target = format!("bettercombat:{stem}");
-            if let Ok(mut c) = parse_player_animator_json(&raw, &cid, "Better Combat", vec![bc_target]) {
+            let mut targets = vec![format!("bettercombat:{stem}")];
+            let mut cats = infer_bc_clip_categories(stem, &anim_to_cats);
+            match stem {
+                "two_handed_slash_horizontal_right" => {
+                    targets.push("simplyswords:warglaive_slash_horizontal_right".into());
+                    cats.extend([WeaponCategory::Katanas, WeaponCategory::Mandobles, WeaponCategory::Lanzas]);
+                }
+                "two_handed_slash_horizontal_left" => {
+                    targets.push("simplyswords:warglaive_slash_horizontal_left".into());
+                    cats.extend([WeaponCategory::Katanas, WeaponCategory::Mandobles, WeaponCategory::Lanzas]);
+                }
+                "two_handed_slash_vertical_right" => {
+                    targets.push("simplyswords:halberd_slash_vertical_right".into());
+                    cats.extend([WeaponCategory::Mandobles, WeaponCategory::Hachas, WeaponCategory::Lanzas]);
+                }
+                "two_handed_spin" => {
+                    targets.extend([
+                        "simplyswords:warglaive_spin".into(),
+                        "simplyswords:two_handed_whirlwind".into(),
+                        "simplyswords:chakram_spin".into(),
+                    ]);
+                    cats.extend([
+                        WeaponCategory::Mandobles,
+                        WeaponCategory::Hachas,
+                        WeaponCategory::Lanzas,
+                        WeaponCategory::Dagas,
+                    ]);
+                }
+                _ => {}
+            }
+            if let Ok(mut c) = parse_player_animator_json(&raw, &cid, "Better Combat", targets) {
                 c.source = ClipSource::BetterCombat;
                 c.status = CurationStatus::Pendiente;
-                c.allowed_categories = normalize_categories(infer_bc_clip_categories(stem, &anim_to_cats));
+                c.allowed_categories = normalize_categories(cats);
                 if let Some(imp) = c.impact_time {
                     c.vfx_events.push(VfxEvent {
                         time: imp,
@@ -1401,76 +1379,6 @@ pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) ->
                 }
                 if seen_ids.insert(c.id.clone()) {
                     clips.push(c);
-                }
-            }
-        }
-    }
-
-    // 3. Simply Swords (`34` PlayerAnimator attack animations).
-    if let Some(mut ss_zip) = open_zip(&mods_dir.join("simplyswords-forge-neoforge-1.70.2-1.20.1.jar")) {
-        let entries = sorted_zip_entries(&mut ss_zip, |n| {
-            n.starts_with("assets/simplyswords/attack_animations/") && n.ends_with(".json")
-        });
-        for entry in entries {
-            let Some(raw) = read_zip_string(&mut ss_zip, &entry) else { continue };
-            let stem = entry.rsplit('/').next().unwrap_or("").trim_end_matches(".json");
-            let cid = format!("ss_{stem}");
-            let bc_target = format!("simplyswords:{stem}");
-            if let Ok(mut c) = parse_player_animator_json(&raw, &cid, "Simply Swords", vec![bc_target]) {
-                c.source = ClipSource::SimplySwords;
-                c.status = CurationStatus::Pendiente;
-                c.allowed_categories = normalize_categories(infer_ss_clip_categories(stem, &anim_to_cats));
-                if let Some(imp) = c.impact_time {
-                    c.vfx_events.push(VfxEvent {
-                        time: imp,
-                        kind: VfxKind::SlashTrail,
-                        color: [0.95, 0.62, 0.25],
-                        scale: 1.05,
-                        duration: 0.16,
-                        intensity: 1.0,
-                        texture_hint: String::new(),
-                    });
-                }
-                if seen_ids.insert(c.id.clone()) {
-                    clips.push(c);
-                }
-            }
-        }
-    }
-
-    // 4. Combat Roll (`1` animation).
-    if let Some(mut cr_zip) = open_zip(&mods_dir.join("combatroll-forge-1.3.3+1.20.1.jar")) {
-        if let Some(raw) = read_zip_string(&mut cr_zip, "assets/combatroll/rolling_animations/roll.json") {
-            if let Ok(mut c) = parse_player_animator_json(&raw, "cr_roll", "Combat Roll", vec!["combatroll:roll".into()]) {
-                c.source = ClipSource::CombatRoll;
-                c.status = CurationStatus::Pendiente;
-                c.gallery_group = GalleryGroup::Movimiento;
-                c.event_tag = Some("ANY:EVADE_DASH".into());
-                if seen_ids.insert(c.id.clone()) {
-                    clips.push(c);
-                }
-            }
-        }
-    }
-
-    // 5. Punchy Moves / Fluid & Foolish (STRICTLY combat tool animations only — never locomotion or ParCool).
-    if let Some(mut ff_zip) = open_zip(&rp_dir.join("Fluid & Foolish 1.0.1.zip")) {
-        let entries = sorted_zip_entries(&mut ff_zip, is_punchy_combat_tool_file);
-        for entry in entries {
-            let Some(raw) = read_zip_string(&mut ff_zip, &entry) else { continue };
-            let tool_cats = normalize_categories(infer_punchy_tool_categories(&entry));
-            if let Ok(parsed) = parse_bedrock_animation_json(&raw, ClipSource::FluidFoolish, CurationStatus::Pendiente) {
-                for mut c in parsed {
-                    if !should_keep_punchy_clip(&c.id) {
-                        continue;
-                    }
-                    let orig_id = c.id.clone();
-                    c.id = format!("pm_{orig_id}");
-                    c.name = prettify_clip_name(&orig_id);
-                    c.allowed_categories = tool_cats.clone();
-                    if seen_ids.insert(c.id.clone()) {
-                        clips.push(c);
-                    }
                 }
             }
         }
@@ -1560,13 +1468,21 @@ mod tests {
     }
 
     #[test]
-    fn enforces_strict_punchy_moves_combat_only_allowlist() {
-        assert!(is_punchy_combat_tool_file("assets/punchy_moves/animations/creator/actions-tool-sword.animation.json"));
-        assert!(!is_punchy_combat_tool_file("assets/punchy_moves/animations/creator/actions-tool-hoe.animation.json"));
-        assert!(!is_punchy_combat_tool_file("assets/punchy_moves/animations/creator/player-walk.animation.json"));
-        assert!(should_keep_punchy_clip("sword_attack_1"));
-        assert!(!should_keep_punchy_clip("axe_mining_right"));
-        assert!(!should_keep_punchy_clip("attack_1_add_right"));
+    fn enforces_non_punchy_moves_minimal_combat_allowlist() {
+        assert!(should_keep_rell_clip("rellseas_attack_3"));
+        assert!(should_keep_rell_clip("rellseas_parry"));
+        assert!(should_keep_rell_clip("rellseas_dodge"));
+        assert!(!should_keep_rell_clip("rellseas_idle"));
+        assert!(!should_keep_rell_clip("rellseas_walk"));
+        assert!(!should_keep_rell_clip("rellseas_attack_1"));
+
+        assert!(should_keep_bc_clip("two_handed_slash_horizontal_right"));
+        assert!(should_keep_bc_clip("two_handed_spin"));
+        assert!(should_keep_bc_clip("dual_handed_slash_cross"));
+        assert!(should_keep_bc_clip("one_handed_uppercut_right"));
+        assert!(!should_keep_bc_clip("pose_two_handed_katana"));
+        assert!(!should_keep_bc_clip("one_handed_punch"));
+        assert!(!should_keep_bc_clip("two_handed_slam"));
     }
 
     #[test]
@@ -1592,11 +1508,12 @@ mod tests {
             weapons.len(),
             clips.len()
         );
-        assert_eq!(c_rell, 15);
-        assert_eq!(c_bc, 30);
-        assert!(c_ss >= 33);
-        assert_eq!(c_cr, 1);
-        assert!(c_ff >= 20);
+        assert_eq!(c_rell, 8);
+        assert_eq!(c_bc, 7);
+        assert_eq!(c_ss, 0);
+        assert_eq!(c_cr, 0);
+        assert_eq!(c_ff, 0);
+        assert_eq!(clips.len(), 15);
     }
 
     #[test]
@@ -1709,18 +1626,23 @@ mod tests {
             assert_eq!(by_id(id).category, WeaponCategory::Arcos, "{id} should be Arcos");
         }
 
-        // Every weapon must have >= 1 specific (non-universal) compatible combat clip.
+        // Every melee weapon must have >= 1 specific compatible clip; Punchy Moves natively covers bows/firearms/shields,
+        // and universal clips (`rellseas_dodge`, `rellseas_geppo_kick`) still allow every weapon.
         for w in &weapons {
-            let specific_cnt = clips
-                .iter()
-                .filter(|c| !c.is_universal() && c.allows_weapon(w))
-                .count();
-            assert!(
-                specific_cnt >= 1,
-                "Weapon {} ({:?}) has 0 specific compatible clips!",
-                w.id,
-                w.category
-            );
+            let compat_cnt = clips.iter().filter(|c| c.allows_weapon(w)).count();
+            assert!(compat_cnt >= 2, "Weapon {} ({:?}) has no universal clips!", w.id, w.category);
+            if !matches!(w.category, WeaponCategory::Arcos | WeaponCategory::Fuego | WeaponCategory::Escudos) {
+                let specific_cnt = clips
+                    .iter()
+                    .filter(|c| !c.is_universal() && c.allows_weapon(w))
+                    .count();
+                assert!(
+                    specific_cnt >= 1,
+                    "Melee weapon {} ({:?}) has 0 specific compatible clips!",
+                    w.id,
+                    w.category
+                );
+            }
         }
 
         // Verify strict incompatibility guard across key cross-family combinations.
@@ -1732,23 +1654,20 @@ mod tests {
         };
 
         let pistol = by_id("musketmod:pistol");
-        assert!(!clip_by_id("bc_pose_two_handed_katana").allows_weapon(pistol));
-        assert!(!clip_by_id("rellseas_attack_1").allows_weapon(pistol));
-        assert!(clip_by_id("bc_pose_two_handed_crossbow").allows_weapon(pistol));
-        assert!(clip_by_id("pm_crossbow_shoot_right").allows_weapon(pistol));
+        assert!(!clip_by_id("rellseas_attack_3").allows_weapon(pistol));
+        assert!(!clip_by_id("bc_two_handed_slash_horizontal_right").allows_weapon(pistol));
+        assert!(clip_by_id("rellseas_dodge").allows_weapon(pistol));
 
         let targe = by_id("cataclysm:black_steel_targe");
-        assert!(!clip_by_id("bc_pose_two_handed_bow").allows_weapon(targe));
-        assert!(clip_by_id("bc_one_handed_punch").allows_weapon(targe));
-        assert!(clips.iter().any(|c| c.id.starts_with("pm_shield") && c.allows_weapon(targe)));
+        assert!(!clip_by_id("bc_two_handed_spin").allows_weapon(targe));
+        assert!(clip_by_id("rellseas_block").allows_weapon(targe));
 
         let gauntlet = by_id("cataclysm:gauntlet_of_guard");
-        assert!(!clip_by_id("pm_bow_shoot_right").allows_weapon(gauntlet));
-        assert!(clip_by_id("bc_one_handed_punch").allows_weapon(gauntlet));
+        assert!(!clip_by_id("rellseas_attack_3").allows_weapon(gauntlet));
+        assert!(clip_by_id("bc_one_handed_uppercut_right").allows_weapon(gauntlet));
 
         let katana = by_id("rellseas:kozuki_katana");
-        assert!(!clip_by_id("pm_crossbow_shoot_right").allows_weapon(katana));
-        assert!(clip_by_id("rellseas_attack_1").allows_weapon(katana));
-        assert!(clip_by_id("bc_pose_two_handed_katana").allows_weapon(katana));
+        assert!(clip_by_id("rellseas_attack_3").allows_weapon(katana));
+        assert!(clip_by_id("bc_two_handed_slash_horizontal_right").allows_weapon(katana));
     }
 }

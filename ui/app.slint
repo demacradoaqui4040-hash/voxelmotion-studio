@@ -36,15 +36,6 @@ export struct CategoryEntry {
     count: int,
 }
 
-export struct CategoryRow {
-    left_idx: int,
-    left_name: string,
-    left_count: int,
-    right_idx: int,
-    right_name: string,
-    right_count: int,
-}
-
 export struct FamilyChipRow {
     left_idx: int,
     left_label: string,
@@ -198,8 +189,8 @@ export component MainWindow inherits Window {
     no-frame: true;
     preferred-width: 1440px;
     preferred-height: 890px;
-    min-width: 1180px;
-    min-height: 760px;
+    min-width: 1024px;
+    min-height: 640px;
     background: Theme.bg-shell;
     default-font-family: Theme.font-ui;
     default-font-size: Theme.fs-body;
@@ -236,13 +227,11 @@ export component MainWindow inherits Window {
     in-out property <string> weapon-search: "";
     in-out property <int> selected-category: 0;
     in-out property <[CategoryEntry]> categories: [];
-    in-out property <[CategoryRow]> category-rows: [];
     in-out property <[WeaponListItem]> filtered-weapons: [];
     in-out property <int> active-weapon-index: 0;
     in-out property <string> active-weapon-name: "Espada de Acero";
     in-out property <string> active-weapon-mod: "VoxelMotion";
     in-out property <string> active-weapon-family: "Espadas";
-    in-out property <string> active-weapon-class: "MEDIUM";
     in-out property <image> weapon-card-img;
     in-out property <int> total-weapon-count: 8;
     callback select-category(int);
@@ -276,16 +265,15 @@ export component MainWindow inherits Window {
     callback rename-clip(string);
     in-out property <bool> solo-weapon: false;
     in-out property <string> status-pill: "BrazoDerecho · Rotar";
-    in-out property <string> kf-badge: "KF 1/4";
     in-out property <bool> auto-keyframe: true;
     in-out property <bool> text-input-active: false;
 
     callback viewport-resized(float, float);
-    callback vp-pointer-down(float, float, int, bool, bool, float, float);
+    callback vp-pointer-down(float, float, int, bool, bool, bool, float, float);
     callback vp-pointer-hover(float, float, float, float);
-    callback vp-pointer-move(float, float, bool, bool, float, float);
+    callback vp-pointer-move(float, float, bool, bool, bool, float, float);
     callback vp-pointer-up(float, float, bool, float, float);
-    callback vp-wheel(float, float, float, float, float);
+    callback vp-wheel(float, float, float, float, float, float, bool, bool, bool);
     callback focus-bone();
     callback reset-camera();
     callback set-camera-preset(int);
@@ -302,7 +290,6 @@ export component MainWindow inherits Window {
     callback toggle-play();
     callback step-frame(int);
     callback jump-kf(int);
-    callback jump-edge(int);
     callback cycle-speed();
     callback studio-key(string, bool, bool, bool);
     callback studio-key-up(string);
@@ -322,24 +309,25 @@ export component MainWindow inherits Window {
     in-out property <string> scl-z: "1.00";
     in-out property <bool> anim-loop: false;
     in-out property <string> duration-text: "0.48";
-    in-out property <float> duration-val: 0.48;
     in-out property <int> easing-idx: 0;
     in-out property <bool> shadows-enabled: true;
-    in-out property <bool> onion-enabled: true;
-    in-out property <bool> trail-enabled: true;
+    in-out property <bool> onion-enabled: false;
+    in-out property <bool> trail-enabled: false;
+    in-out property <bool> auto-crouch-knees: true;
     in-out property <int> bg-idx: 0;
 
     callback step-bone-axis(int, int, float);
     callback scrub-axis-start();
-    callback scrub-bone-axis(int, int, float);
+    callback scrub-bone-axis(int, int, float, bool, bool);
+    callback wheel-bone-axis(int, int, float, bool, bool);
     callback reset-bone-axis(int, int);
     callback toggle-loop(bool);
-    callback change-duration(float);
     callback set-clip-frames(int);
     callback set-easing(int);
     callback toggle-shadows(bool);
     callback toggle-onion(bool);
     callback toggle-trail(bool);
+    callback toggle-crouch-knees(bool);
     callback set-bg-mode(int);
     callback undo-action();
     callback redo-action();
@@ -367,11 +355,11 @@ export component MainWindow inherits Window {
     in-out property <bool> impact-visible: true;
     in-out property <int> bone-clipboard-count: 0;
     in-out property <string> bone-clipboard-label: "";
+    in-out property <int> selected-keys-count: 0;
     in-out property <int> selected-range-count: 0;
     in-out property <int> selected-range-track-idx: -1;
     in-out property <float> selected-range-start-frac: 0.0;
     in-out property <float> selected-range-end-frac: 0.0;
-    in-out property <int> selected-kf-idx: 0;
     in-out property <bool> shift-held: false;
     in-out property <bool> ctrl-held: false;
     in-out property <bool> timeline-ctx-open: false;
@@ -379,9 +367,14 @@ export component MainWindow inherits Window {
     in-out property <int> timeline-ctx-bone-idx: 3;
     in-out property <string> timeline-ctx-bone-name: "BrazoDerecho";
     callback scrub-timeline(float);
-    callback click-diamond(int, int, bool);
+    callback click-diamond(int, int, bool, bool);
+    callback end-drag-diamond(int, int);
+    callback box-select-keyframes(float, float, float, float, bool, bool);
+    callback select-all-keyframes-action();
+    callback clear-keyframe-selection-action();
+    callback duplicate-selected-keyframes-action();
     callback drag-diamond(int, float);
-    callback zoom-timeline(float, float);
+    callback zoom-timeline(float, float, bool);
     callback reset-timeline-zoom();
     callback pan-timeline(float);
     callback set-timeline-view-start(float);
@@ -413,8 +406,6 @@ export component MainWindow inherits Window {
     in-out property <[GalleryRow]> gallery-rows: [];
     in-out property <float> gallery-content-h: 400.0;
     in-out property <string> featured-gallery-id: "action_1";
-    in-out property <string> featured-gallery-name: "Nueva Acción";
-    in-out property <image> featured-gallery-thumb;
     callback toggle-gallery-group(int);
     callback filter-gallery(int);
     callback search-gallery(string);
@@ -458,12 +449,8 @@ export component MainWindow inherits Window {
     in-out property <string> rell-profile-label: "Modo Público (sin modpack)";
     in-out property <int> weapon-status-filter: 0;
     in-out property <int> active-weapon-status: 0;
-    in-out property <string> active-weapon-bc-arch: "";
-    in-out property <int> gallery-source-filter: 0;
-    in-out property <int> gallery-status-filter: 0;
     in-out property <bool> gallery-compat-only: false;
     in-out property <int> active-clip-status: 0;
-    in-out property <string> active-clip-source: "Custom";
     in-out property <bool> active-clip-compatible: true;
     in-out property <string> active-clip-targets: "Universal (todos)";
     in-out property <bool> active-clip-universal: true;
@@ -474,9 +461,6 @@ export component MainWindow inherits Window {
     in-out property <int> new-vfx-color-idx: 0;
     callback filter-weapon-status(int);
     callback set-weapon-status(int, int);
-    callback export-curated-weapons-action();
-    callback filter-gallery-source(int);
-    callback filter-gallery-status(int);
     callback toggle-gallery-compat-only();
     callback equip-compatible-weapon();
     callback allow-active-weapon-family();
@@ -553,6 +537,10 @@ export component MainWindow inherits Window {
                 }
             }
             if (!root.text-input-active) {
+                if (ev.text == Key.Escape) {
+                    root.studio-key("esc", false, false, false);
+                    return accept;
+                }
                 if (ev.text == Key.Tab) {
                     root.close-popovers();
                     root.toggle-focus-mode();
@@ -1258,10 +1246,10 @@ export component MainWindow inherits Window {
                                         root.close-popovers();
                                         root-focus.focus();
                                         self.dragging = true;
-                                        root.vp-pointer-down(mx, my, btn, ev.modifiers.shift || ev.modifiers.alt, ev.modifiers.control, w, h);
+                                        root.vp-pointer-down(mx, my, btn, ev.modifiers.shift, ev.modifiers.alt, ev.modifiers.control, w, h);
                                     } else if (ev.kind == PointerEventKind.move) {
                                         if (self.dragging) {
-                                            root.vp-pointer-move(mx, my, ev.modifiers.shift || ev.modifiers.alt, ev.modifiers.control, w, h);
+                                            root.vp-pointer-move(mx, my, ev.modifiers.shift, ev.modifiers.alt, ev.modifiers.control, w, h);
                                         } else {
                                             root.vp-pointer-hover(mx, my, w, h);
                                         }
@@ -1273,8 +1261,7 @@ export component MainWindow inherits Window {
                                     }
                                 }
                                 scroll-event(ev) => {
-                                    let dy = ev.delta-y != 0px ? ev.delta-y : ev.delta-x;
-                                    root.vp-wheel(self.mouse-x / 1px, self.mouse-y / 1px, self.width / 1px, self.height / 1px, dy / 1px);
+                                    root.vp-wheel(self.mouse-x / 1px, self.mouse-y / 1px, self.width / 1px, self.height / 1px, ev.delta-x / 1px, ev.delta-y / 1px, ev.modifiers.control, ev.modifiers.shift, ev.modifiers.alt);
                                     accept
                                 }
                             }
@@ -1624,9 +1611,9 @@ export component MainWindow inherits Window {
                                                 Text { text: "Posición (px)"; color: Theme.text-dim; font-size: Theme.fs-meta; }
                                                 HorizontalLayout {
                                                     spacing: 4px;
-                                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.pos-x; step(d) => { root.step-bone-axis(0, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(0, 0, dx); } reset-axis => { root.reset-bone-axis(0, 0); } }
-                                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.pos-y; step(d) => { root.step-bone-axis(0, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(0, 1, dx); } reset-axis => { root.reset-bone-axis(0, 1); } }
-                                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.pos-z; step(d) => { root.step-bone-axis(0, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(0, 2, dx); } reset-axis => { root.reset-bone-axis(0, 2); } }
+                                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.pos-x; step(d) => { root.step-bone-axis(0, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(0, 0, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(0, 0, dy, sh, ct); } reset-axis => { root.reset-bone-axis(0, 0); } }
+                                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.pos-y; step(d) => { root.step-bone-axis(0, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(0, 1, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(0, 1, dy, sh, ct); } reset-axis => { root.reset-bone-axis(0, 1); } }
+                                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.pos-z; step(d) => { root.step-bone-axis(0, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(0, 2, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(0, 2, dy, sh, ct); } reset-axis => { root.reset-bone-axis(0, 2); } }
                                                 }
                                             }
                                             VerticalLayout {
@@ -1634,9 +1621,9 @@ export component MainWindow inherits Window {
                                                 Text { text: "Rotación (°)"; color: Theme.text-dim; font-size: Theme.fs-meta; }
                                                 HorizontalLayout {
                                                     spacing: 4px;
-                                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.rot-x; step(d) => { root.step-bone-axis(1, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(1, 0, dx); } reset-axis => { root.reset-bone-axis(1, 0); } }
-                                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.rot-y; step(d) => { root.step-bone-axis(1, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(1, 1, dx); } reset-axis => { root.reset-bone-axis(1, 1); } }
-                                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.rot-z; step(d) => { root.step-bone-axis(1, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(1, 2, dx); } reset-axis => { root.reset-bone-axis(1, 2); } }
+                                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.rot-x; step(d) => { root.step-bone-axis(1, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(1, 0, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(1, 0, dy, sh, ct); } reset-axis => { root.reset-bone-axis(1, 0); } }
+                                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.rot-y; step(d) => { root.step-bone-axis(1, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(1, 1, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(1, 1, dy, sh, ct); } reset-axis => { root.reset-bone-axis(1, 1); } }
+                                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.rot-z; step(d) => { root.step-bone-axis(1, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(1, 2, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(1, 2, dy, sh, ct); } reset-axis => { root.reset-bone-axis(1, 2); } }
                                                 }
                                             }
                                             VerticalLayout {
@@ -1644,9 +1631,9 @@ export component MainWindow inherits Window {
                                                 Text { text: "Escala"; color: Theme.text-dim; font-size: Theme.fs-meta; }
                                                 HorizontalLayout {
                                                     spacing: 4px;
-                                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.scl-x; step(d) => { root.step-bone-axis(2, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(2, 0, dx); } reset-axis => { root.reset-bone-axis(2, 0); } }
-                                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.scl-y; step(d) => { root.step-bone-axis(2, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(2, 1, dx); } reset-axis => { root.reset-bone-axis(2, 1); } }
-                                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.scl-z; step(d) => { root.step-bone-axis(2, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx) => { root.scrub-bone-axis(2, 2, dx); } reset-axis => { root.reset-bone-axis(2, 2); } }
+                                                    AxisCell { axis: "X"; axis-color: Theme.axis-x; value-text: root.scl-x; step(d) => { root.step-bone-axis(2, 0, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(2, 0, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(2, 0, dy, sh, ct); } reset-axis => { root.reset-bone-axis(2, 0); } }
+                                                    AxisCell { axis: "Y"; axis-color: Theme.axis-y; value-text: root.scl-y; step(d) => { root.step-bone-axis(2, 1, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(2, 1, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(2, 1, dy, sh, ct); } reset-axis => { root.reset-bone-axis(2, 1); } }
+                                                    AxisCell { axis: "Z"; axis-color: Theme.axis-z; value-text: root.scl-z; step(d) => { root.step-bone-axis(2, 2, d); } scrub-start => { root.scrub-axis-start(); } scrub(dx, sh, ct) => { root.scrub-bone-axis(2, 2, dx, sh, ct); } wheel(dy, sh, ct) => { root.wheel-bone-axis(2, 2, dy, sh, ct); } reset-axis => { root.reset-bone-axis(2, 2); } }
                                                 }
                                             }
                                         }
@@ -1939,7 +1926,7 @@ export component MainWindow inherits Window {
                                         spacing: 2px;
                                         StudioButton {
                                             width: 18px; height: 22px; compact: true; ghost: true; label: "-";
-                                            clicked => { root.zoom-timeline(-1.0, 0.5); }
+                                            clicked => { root.zoom-timeline(-1.0, 0.5, true); }
                                         }
                                         zoom-reset-ta := TouchArea {
                                             width: 34px; height: 22px; mouse-cursor: pointer;
@@ -1959,7 +1946,7 @@ export component MainWindow inherits Window {
                                         }
                                         StudioButton {
                                             width: 18px; height: 22px; compact: true; ghost: true; label: "+";
-                                            clicked => { root.zoom-timeline(1.0, 0.5); }
+                                            clicked => { root.zoom-timeline(1.0, 0.5, true); }
                                         }
                                     }
 
@@ -2025,29 +2012,33 @@ export component MainWindow inherits Window {
 
                                 // Right Scope Switch (Hueso | Todo) + Keyframe Actions (Pack, Spread, Copy, Paste, Add, Impact, Delete)
                                 HorizontalLayout {
-                                    x: parent.width - 332px;
+                                    x: parent.width - 368px;
                                     y: 3px;
-                                    width: 324px;
+                                    width: 360px;
                                     height: 26px;
                                     spacing: 4px;
                                     alignment: end;
 
-                                    if root.selected-range-count > 1 : Rectangle {
-                                        width: 28px;
+                                    if root.selected-keys-count > 1 : TouchArea {
+                                        width: 44px;
                                         height: 22px;
                                         y: 2px;
-                                        border-radius: Theme.radius-control;
-                                        background: Theme.accent-soft;
-                                        border-width: 1px;
-                                        border-color: Theme.accent;
-                                        Text {
-                                            text: root.selected-range-count + "f";
-                                            color: Theme.accent-text;
-                                            font-family: Theme.font-mono;
-                                            font-size: Theme.fs-meta;
-                                            font-weight: 700;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.clear-keyframe-selection-action(); }
+                                        Rectangle {
+                                            border-radius: Theme.radius-control;
+                                            background: Theme.accent-soft;
+                                            border-width: 1px;
+                                            border-color: Theme.accent;
+                                            Text {
+                                                text: root.selected-keys-count + " sel";
+                                                color: Theme.accent-text;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.fs-meta;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                     }
 
@@ -2169,11 +2160,11 @@ export component MainWindow inherits Window {
                                             let dy = ev.delta-y / 1px;
                                             if (abs(dx) > 0.0 || root.shift-held) {
                                                 let d = abs(dx) > 0.0 ? -dx : -dy;
-                                                root.pan-timeline(d / 640.0);
+                                                root.pan-timeline(d / max(180.0, lane_w));
                                                 return accept;
                                             }
                                             if (abs(dy) > 0.0) {
-                                                root.zoom-timeline(dy, anchor);
+                                                root.zoom-timeline(dy, anchor, false);
                                                 return accept;
                                             }
                                             reject
@@ -2308,29 +2299,59 @@ export component MainWindow inherits Window {
                                         lanes-area := TouchArea {
                                             width: parent.width;
                                             height: parent.height;
-                                            property <bool> dragging-playhead: false;
+                                            property <bool> box-pressed: false;
+                                            property <bool> box-dragging: false;
+                                            property <float> box-start-x: 0;
+                                            property <float> box-start-y: 0;
+                                            property <float> box-cur-x: 0;
+                                            property <float> box-cur-y: 0;
                                             property <bool> panning: false;
                                             property <float> pan-last-x: 0;
 
                                             pointer-event(ev) => {
                                                 let mx = self.mouse-x / 1px;
+                                                let my = self.mouse-y / 1px;
                                                 let lane_w = max(1.0, (self.width / 1px) - 20.0);
                                                 let f = clamp((mx - 10.0) / lane_w, 0.0, 1.0);
                                                 if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                                     root-focus.focus();
-                                                    self.dragging-playhead = true;
-                                                    root.scrub-timeline(f);
+                                                    self.box-pressed = true;
+                                                    self.box-dragging = false;
+                                                    self.box-start-x = mx;
+                                                    self.box-start-y = my;
+                                                    self.box-cur-x = mx;
+                                                    self.box-cur-y = my;
                                                 } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.middle) {
                                                     root-focus.focus();
                                                     self.panning = true;
                                                     self.pan-last-x = mx;
-                                                } else if (ev.kind == PointerEventKind.move && self.dragging-playhead) {
-                                                    root.scrub-timeline(f);
+                                                } else if (ev.kind == PointerEventKind.move && self.box-pressed) {
+                                                    self.box-cur-x = mx;
+                                                    self.box-cur-y = my;
+                                                    if (!self.box-dragging && (abs(mx - self.box-start-x) > 4.0 || abs(my - self.box-start-y) > 4.0)) {
+                                                        self.box-dragging = true;
+                                                    }
+                                                    if (self.box-dragging) {
+                                                        let f0 = clamp((min(self.box-start-x, self.box-cur-x) - 10.0) / lane_w, 0.0, 1.0);
+                                                        let f1 = clamp((max(self.box-start-x, self.box-cur-x) - 10.0) / lane_w, 0.0, 1.0);
+                                                        root.box-select-keyframes(f0, f1, min(self.box-start-y, self.box-cur-y), max(self.box-start-y, self.box-cur-y), root.shift-held || root.ctrl-held, false);
+                                                    }
                                                 } else if (ev.kind == PointerEventKind.move && self.panning) {
                                                     root.pan-timeline(-(mx - self.pan-last-x) / lane_w);
                                                     self.pan-last-x = mx;
                                                 } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
-                                                    self.dragging-playhead = false;
+                                                    if (self.box-pressed) {
+                                                        if (self.box-dragging) {
+                                                            let f0 = clamp((min(self.box-start-x, self.box-cur-x) - 10.0) / lane_w, 0.0, 1.0);
+                                                            let f1 = clamp((max(self.box-start-x, self.box-cur-x) - 10.0) / lane_w, 0.0, 1.0);
+                                                            root.box-select-keyframes(f0, f1, min(self.box-start-y, self.box-cur-y), max(self.box-start-y, self.box-cur-y), root.shift-held || root.ctrl-held, true);
+                                                        } else {
+                                                            root.clear-keyframe-selection-action();
+                                                            root.scrub-timeline(f);
+                                                        }
+                                                    }
+                                                    self.box-pressed = false;
+                                                    self.box-dragging = false;
                                                     self.panning = false;
                                                 }
                                             }
@@ -2341,11 +2362,11 @@ export component MainWindow inherits Window {
                                                 let dy = ev.delta-y / 1px;
                                                 if (abs(dx) > 0.0 || root.shift-held) {
                                                     let d = abs(dx) > 0.0 ? -dx : -dy;
-                                                    root.pan-timeline(d / 640.0);
+                                                    root.pan-timeline(d / max(180.0, lane_w));
                                                     return accept;
                                                 }
                                                 if (abs(dy) > 0.0 && (!root.show-all-bones || root.ctrl-held)) {
-                                                    root.zoom-timeline(dy, anchor);
+                                                    root.zoom-timeline(dy, anchor, false);
                                                     return accept;
                                                 }
                                                 reject
@@ -2417,12 +2438,14 @@ export component MainWindow inherits Window {
                                                     let mx = self.mouse-x / 1px;
                                                     if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                                         root-focus.focus();
-                                                        self.dragging-dm = !root.shift-held;
+                                                        self.dragging-dm = !root.shift-held && !root.ctrl-held;
                                                         self.press-x = (self.x / 1px) + mx;
-                                                        root.click-diamond(dm.kf_idx, dm.track_idx, root.shift-held);
+                                                        root.click-diamond(dm.kf_idx, dm.track_idx, root.shift-held, root.ctrl-held);
                                                     } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
                                                         root-focus.focus();
-                                                        root.click-diamond(dm.kf_idx, dm.track_idx, false);
+                                                        if (!dm.is_selected) {
+                                                            root.click-diamond(dm.kf_idx, dm.track_idx, false, false);
+                                                        }
                                                         root.close-popovers();
                                                         root.timeline-ctx-bone-idx = root.active-bone-idx;
                                                         root.timeline-ctx-bone-name = root.active-bone-name;
@@ -2436,7 +2459,10 @@ export component MainWindow inherits Window {
                                                             root.drag-diamond(dm.kf_idx, new_f);
                                                         }
                                                     } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
-                                                        self.dragging-dm = false;
+                                                        if (self.dragging-dm) {
+                                                            self.dragging-dm = false;
+                                                            root.end-drag-diamond(dm.kf_idx, dm.track_idx);
+                                                        }
                                                     }
                                                 }
                                                 if dm.is_selected : Rectangle {
@@ -2454,6 +2480,18 @@ export component MainWindow inherits Window {
                                                     stroke-width: 1px;
                                                     commands: "M6 1 L11 6 L6 11 L1 6 Z";
                                                 }
+                                            }
+
+                                            // Multi-keyframe marquee box selection overlay
+                                            if lanes-area.box-dragging : Rectangle {
+                                                x: min(lanes-area.box-start-x, lanes-area.box-cur-x) * 1px;
+                                                y: min(lanes-area.box-start-y, lanes-area.box-cur-y) * 1px;
+                                                width: max(2px, abs(lanes-area.box-cur-x - lanes-area.box-start-x) * 1px);
+                                                height: max(2px, abs(lanes-area.box-cur-y - lanes-area.box-start-y) * 1px);
+                                                border-radius: 3px;
+                                                background: Theme.accent-soft;
+                                                border-width: 1px;
+                                                border-color: Theme.accent;
                                             }
 
                                             // Accent Playhead Line
@@ -2518,9 +2556,9 @@ export component MainWindow inherits Window {
         // 0. POPOVER: TIMELINE BONE CONTEXT MENU (Right-click on Track or Diamond)
         if root.timeline-ctx-open : Rectangle {
             x: root.timeline-ctx-x;
-            y: root.height - 160px - 442px;
+            y: root.height - 160px - 498px;
             width: 272px;
-            height: 436px;
+            height: 492px;
             border-radius: Theme.radius-overlay;
             background: Theme.bg-popover;
             border-width: 1px;
@@ -2536,26 +2574,38 @@ export component MainWindow inherits Window {
                     padding-left: 10px;
                     padding-right: 10px;
                     alignment: space-between;
-                    Text { text: root.timeline-ctx-bone-name; color: Theme.text-primary; font-size: Theme.fs-meta; font-weight: 700; vertical-alignment: center; }
+                    Text {
+                        text: root.selected-keys-count > 1
+                            ? ("Selección (" + root.selected-keys-count + " frames)")
+                            : root.timeline-ctx-bone-name;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-meta;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
                     if root.bone-clipboard-count > 0 : Text { text: root.bone-clipboard-label; color: Theme.accent-text; font-family: Theme.font-mono; font-size: Theme.fs-meta; vertical-alignment: center; }
                 }
                 Hairline { }
 
                 for mi in [
-                    { id: "copy_f", lbl: "Copiar frame(s) del hueso", sc: "Ctrl+C" },
+                    { id: "copy_f", lbl: "Copiar selección / frame", sc: "Ctrl+C" },
                     { id: "copy_tr", lbl: "Copiar toda la pista del hueso", sc: "" },
-                    { id: "paste", lbl: "Pegar en este hueso aquí", sc: "Ctrl+V" },
+                    { id: "paste", lbl: "Pegar aquí", sc: "Ctrl+V" },
                     { id: "paste_mir", lbl: "Pegar espejado en este hueso", sc: "" },
-                    { id: "dup", lbl: "Duplicar frame siguiente", sc: "" },
+                    { id: "dup_sel", lbl: "Duplicar selección / frame", sc: "Ctrl+D" },
+                    { id: "dup", lbl: "Duplicar hueso +1f adelante", sc: "" },
+                    { id: "sel_all", lbl: "Seleccionar todos los frames", sc: "Ctrl+A" },
                 ] : TouchArea {
                     height: 26px; mouse-cursor: pointer;
                     clicked => {
                         root.close-popovers();
-                        if (mi.id == "copy_f") { root.copy-bone-action(false); }
+                        if (mi.id == "copy_f") { root.copy-timeline-action(); }
                         else if (mi.id == "copy_tr") { root.copy-bone-action(true); }
-                        else if (mi.id == "paste") { root.paste-bone-action(false); }
+                        else if (mi.id == "paste") { root.paste-timeline-action(); }
                         else if (mi.id == "paste_mir") { root.paste-bone-action(true); }
+                        else if (mi.id == "dup_sel") { root.duplicate-selected-keyframes-action(); }
                         else if (mi.id == "dup") { root.dup-kf-next(); }
+                        else if (mi.id == "sel_all") { root.select-all-keyframes-action(); }
                     }
                     Rectangle {
                         border-radius: Theme.radius-control;
@@ -2596,13 +2646,13 @@ export component MainWindow inherits Window {
                 Hairline { }
 
                 for md in [
-                    { id: "del_f", lbl: "Borrar frame(s) de este hueso", sc: "Supr" },
+                    { id: "del_f", lbl: "Borrar selección / frame(s)", sc: "Supr" },
                     { id: "del_tr", lbl: "Limpiar toda la pista del hueso", sc: "" },
                 ] : TouchArea {
                     height: 26px; mouse-cursor: pointer;
                     clicked => {
                         root.close-popovers();
-                        if (md.id == "del_f") { root.delete-bone-action(false); }
+                        if (md.id == "del_f") { root.delete-keyframe-action(); }
                         else if (md.id == "del_tr") { root.delete-bone-action(true); }
                     }
                     Rectangle {
@@ -2958,7 +3008,7 @@ export component MainWindow inherits Window {
             x: (root.focus-mode ? parent.width : parent.width - 272px) - 246px;
             y: 84px;
             width: 234px;
-            height: 368px;
+            height: 396px;
             border-radius: Theme.radius-overlay;
             background: Theme.bg-popover;
             border-width: 1px;
@@ -2988,6 +3038,11 @@ export component MainWindow inherits Window {
                     alignment: space-between;
                     Text { text: "Estela de golpe (trail)"; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                     StudioSwitch { checked: root.trail-enabled; toggled(v) => { root.toggle-trail(v); } }
+                }
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text { text: "Rodillas al agachar"; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
+                    StudioSwitch { checked: root.auto-crouch-knees; toggled(v) => { root.toggle-crouch-knees(v); } }
                 }
                 HorizontalLayout {
                     alignment: space-between;

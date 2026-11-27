@@ -93,7 +93,7 @@ impl ViewportCameraController {
                 self.target_dist = 3.3;
             }
             _ => {
-                self.target_yaw = 3.14;
+                self.target_yaw = std::f32::consts::PI;
                 self.target_pitch = 0.18;
                 self.target_dist = 3.3;
             }
@@ -132,7 +132,27 @@ impl ViewportCameraController {
         self.clear_zoom_burst();
     }
 
+    /// Low-latency silky orbit with 38% immediate lead and exponential settle across 60-144Hz frames.
+    pub fn orbit_smooth(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        yaw_sens: f32,
+        pitch_sens: f32,
+        min_pitch: f32,
+        max_pitch: f32,
+    ) {
+        let sy = -dx * yaw_sens;
+        let sp = dy * pitch_sens;
+        self.target_yaw += sy;
+        self.target_pitch = (self.target_pitch + sp).clamp(min_pitch, max_pitch);
+        self.current.yaw += sy * 0.38;
+        self.current.pitch = (self.current.pitch + sp * 0.38).clamp(min_pitch, max_pitch);
+        self.clear_zoom_burst();
+    }
+
     /// Additive pan applied to BOTH current and target positions so panning never cancels active zoom interpolation.
+    #[cfg(test)]
     pub fn pan(&mut self, dx: f32, dy: f32, sens_factor: f32) {
         let (cam_r, cam_u, _) = camera_basis(self.current.yaw, self.current.pitch);
         let sens = self.current.dist * sens_factor;
@@ -140,11 +160,28 @@ impl ViewportCameraController {
         self.apply_target_delta(delta);
     }
 
-    /// 1:1 immediate vertical Ctrl+drag dolly zoom.
-    pub fn dolly_drag(&mut self, dy: f32) {
-        let next_d = (self.current.dist * (dy * 0.009).exp()).clamp(0.22, self.max_dist);
-        self.current.dist = next_d;
-        self.target_dist = next_d;
+    /// Silky 45%-lead damped pan eliminating stair-stepping on 125Hz mice and touchpads.
+    pub fn pan_smooth(&mut self, dx: f32, dy: f32, sens_factor: f32) {
+        let (cam_r, cam_u, _) = camera_basis(self.current.yaw, self.current.pitch);
+        let sens = self.current.dist * sens_factor;
+        let delta = cam_r.mul(-dx * sens).add(cam_u.mul(dy * sens));
+        let clamp_target = |p: &mut [f32; 3], d: Vec3| {
+            p[0] = (p[0] + d.x).clamp(-6.0, 6.0);
+            p[1] = (p[1] + d.y).clamp(-0.5, 4.0);
+            p[2] = (p[2] + d.z).clamp(-6.0, 6.0);
+        };
+        clamp_target(&mut self.target_pos, delta);
+        clamp_target(&mut self.current.target, delta.mul(0.45));
+        if let Some(ref mut anchor) = self.zoom_burst_anchor {
+            clamp_target(anchor, delta);
+        }
+    }
+
+    /// Smooth Ctrl+drag dolly zoom with 45% lead + exponential glide.
+    pub fn dolly_smooth(&mut self, dy: f32) {
+        let next_t = (self.target_dist * (dy * 0.0075).exp()).clamp(0.22, self.max_dist);
+        self.target_dist = next_t;
+        self.current.dist += (next_t - self.current.dist) * 0.45;
         self.last_zoom_at = Some(Instant::now());
         self.clear_zoom_burst();
     }
@@ -287,7 +324,7 @@ impl ViewportCameraController {
             moved = true;
         }
 
-        let alpha_rot = 1.0 - (-22.0 * dt_clamped).exp();
+        let alpha_rot = 1.0 - (-32.0 * dt_clamped).exp();
         let dyaw = (self.target_yaw - self.current.yaw)
             .sin()
             .atan2((self.target_yaw - self.current.yaw).cos());

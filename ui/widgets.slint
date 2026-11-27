@@ -270,7 +270,8 @@ export component AxisCell inherits Rectangle {
     in property <string> value-text: "0.00";
     callback step(float);
     callback scrub-start();
-    callback scrub(float);
+    callback scrub(float, bool, bool);
+    callback wheel(float, bool, bool);
     callback reset-axis();
 
     height: 24px;
@@ -303,11 +304,19 @@ export component AxisCell inherits Rectangle {
                     let dx = mx - self.last-x;
                     self.last-x = mx;
                     if (abs(dx) > 0.01) {
-                        root.scrub(dx);
+                        root.scrub(dx, ev.modifiers.shift, ev.modifiers.control);
                     }
                 } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
                     self.dragging = false;
                 }
+            }
+            scroll-event(ev) => {
+                let d = ev.delta-y != 0px ? ev.delta-y : ev.delta-x;
+                if (abs(d / 1px) > 0.01) {
+                    root.wheel(d / 1px, ev.modifiers.shift, ev.modifiers.control);
+                    return accept;
+                }
+                reject
             }
 
             HorizontalLayout {

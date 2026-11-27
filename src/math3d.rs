@@ -10,6 +10,9 @@ pub enum GizmoAxis {
     X,
     Y,
     Z,
+    XY,
+    XZ,
+    YZ,
     Roll,
     Free,
 }
@@ -21,10 +24,110 @@ impl GizmoAxis {
             Self::X => "Eje X",
             Self::Y => "Eje Y",
             Self::Z => "Eje Z",
-            Self::Roll => "Giro Z/Vista",
+            Self::XY => "Plano XY",
+            Self::XZ => "Plano XZ",
+            Self::YZ => "Plano YZ",
+            Self::Roll => "Giro Vista",
             Self::Free => "Libre 3D",
         }
     }
+}
+
+/// Constant screen-space world radius for gizmos regardless of zoom distance.
+#[inline]
+pub fn gizmo_world_scale(eye: Vec3, pivot: Vec3) -> f32 {
+    (eye.sub(pivot).len() * 0.145).clamp(0.18, 1.85)
+}
+
+/// Unproject a logical screen coordinate into a normalized world-space `(origin, direction)` ray.
+pub fn screen_ray(inv_vp: Mat4, mx: f32, my: f32, vw: f32, vh: f32) -> (Vec3, Vec3) {
+    let nx = (mx / vw.max(1.0)) * 2.0 - 1.0;
+    let ny = 1.0 - (my / vh.max(1.0)) * 2.0;
+    let p0 = inv_vp.transform_point(Vec3::new(nx, ny, 0.0));
+    let p1 = inv_vp.transform_point(Vec3::new(nx, ny, 0.98));
+    (p0, p1.sub(p0).norm())
+}
+
+/// Intersect a ray `(ro, rd)` with plane `(plane_p, plane_n)` in front of the ray origin.
+pub fn ray_plane_intersect(ro: Vec3, rd: Vec3, plane_p: Vec3, plane_n: Vec3) -> Option<Vec3> {
+    let denom = rd.dot(plane_n);
+    if denom.abs() < 1e-4 {
+        return None;
+    }
+    let t = plane_p.sub(ro).dot(plane_n) / denom;
+    if t <= 0.01 {
+        return None;
+    }
+    Some(ro.add(rd.mul(t)))
+}
+
+/// Signed distance parameter `s` along `(line_p, line_d)` closest to ray `(ro, rd)`.
+pub fn ray_closest_param_on_line(ro: Vec3, rd: Vec3, line_p: Vec3, line_d: Vec3) -> Option<f32> {
+    let w0 = line_p.sub(ro);
+    let b = line_d.dot(rd);
+    let d = line_d.dot(w0);
+    let e = rd.dot(w0);
+    let denom = 1.0 - b * b;
+    if denom < 1e-3 {
+        return None;
+    }
+    let t = (e - b * d) / denom;
+    if t <= 0.01 {
+        return None;
+    }
+    Some((b * e - d) / denom)
+}
+
+/// Decompose a pure rotation matrix into ZYX Euler degrees `(rx, ry, rz)` continuously relative to `prev_deg`.
+pub fn decompose_zyx_continuous(rot_m: Mat4, prev_deg: [f32; 3]) -> [f32; 3] {
+    let m = &rot_m.m;
+    let sy = (-m[2]).clamp(-1.0, 1.0);
+    let cy = (1.0 - sy * sy).max(0.0).sqrt();
+    let rad2deg = 180.0 / std::f32::consts::PI;
+    let unwrap = |deg: f32, prev: f32| -> f32 {
+        prev + (deg - prev + 180.0).rem_euclid(360.0) - 180.0
+    };
+
+    let mut out = if cy < 1e-4 {
+        let y = sy.asin() * rad2deg;
+        let z = prev_deg[2];
+        let x = if sy > 0.0 {
+            z + m[4].atan2(m[5]) * rad2deg
+        } else {
+            (-m[4]).atan2(m[5]) * rad2deg - z
+        };
+        [unwrap(x, prev_deg[0]), unwrap(y, prev_deg[1]), unwrap(z, prev_deg[2])]
+    } else {
+        let y1 = sy.asin();
+        let x1 = m[6].atan2(m[10]);
+        let z1 = m[1].atan2(m[0]);
+        let cand1 = [
+            unwrap(x1 * rad2deg, prev_deg[0]),
+            unwrap(y1 * rad2deg, prev_deg[1]),
+            unwrap(z1 * rad2deg, prev_deg[2]),
+        ];
+
+        let y2 = std::f32::consts::PI - y1;
+        let x2 = (-m[6]).atan2(-m[10]);
+        let z2 = (-m[1]).atan2(-m[0]);
+        let cand2 = [
+            unwrap(x2 * rad2deg, prev_deg[0]),
+            unwrap(y2 * rad2deg, prev_deg[1]),
+            unwrap(z2 * rad2deg, prev_deg[2]),
+        ];
+
+        let d1: f32 = (0..3).map(|i| (cand1[i] - prev_deg[i]).powi(2)).sum();
+        let d2: f32 = (0..3).map(|i| (cand2[i] - prev_deg[i]).powi(2)).sum();
+        if d1 <= d2 { cand1 } else { cand2 }
+    };
+
+    for i in 0..3 {
+        if out[i].abs() < 1e-4 && prev_deg[i].abs() < 1e-4 {
+            out[i] = 0.0;
+        }
+        out[i] = out[i].clamp(-720.0, 720.0);
+    }
+    out
 }
 
 /// Camera orthonormal basis in world space: (right, up, look_forward).
@@ -106,56 +209,162 @@ pub fn matrix_axes_world(parent_world: Mat4) -> [Vec3; 3] {
     ]
 }
 
-/// Pick hovered/clicked gizmo handle in screen pixels.
+/// Pick hovered/clicked gizmo handle in screen pixels using exact geometry for the active tool.
+#[allow(clippy::too_many_arguments)]
 pub fn pick_gizmo_handle(
+    tool: ToolMode,
     mx: f32,
     my: f32,
     vp: Mat4,
+    inv_vp: Mat4,
     vw: f32,
     vh: f32,
     pivot: Vec3,
     axes: [Vec3; 3],
     cam_right: Vec3,
-    axis_len_world: f32,
-    ring_radius_world: f32,
+    eye: Vec3,
 ) -> GizmoAxis {
+    if !matches!(tool, ToolMode::Rotate | ToolMode::Move | ToolMode::Scale) {
+        return GizmoAxis::None;
+    }
     let Some((px, py)) = project_to_screen(vp, pivot, vw, vh) else {
         return GizmoAxis::None;
     };
+    let scale = gizmo_world_scale(eye, pivot);
+    let to_cam = eye.sub(pivot).norm();
     let center_d = (mx - px).hypot(my - py);
-    if center_d <= 18.0 {
-        return GizmoAxis::Free;
-    }
 
-    let mut best_axis = GizmoAxis::None;
-    let mut best_d = 10.5f32;
-    let axis_ids = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
-    for i in 0..3 {
-        if let Some((tx, ty)) = project_to_screen(vp, pivot.add(axes[i].mul(axis_len_world)), vw, vh) {
-            let d = point_to_segment_dist(mx, my, px, py, tx, ty);
-            if d < best_d {
-                best_d = d;
-                best_axis = axis_ids[i];
+    match tool {
+        ToolMode::Rotate => {
+            // Check 3 orthogonal 3D rings first, strongly preferring front-hemisphere arcs.
+            let rings = [
+                (axes[1], axes[2], GizmoAxis::X),
+                (axes[2], axes[0], GizmoAxis::Y),
+                (axes[0], axes[1], GizmoAxis::Z),
+            ];
+            let segs = 48usize;
+            let mut best_ring = GizmoAxis::None;
+            let mut best_score = f32::MAX;
+            for (u_ax, v_ax, axis_id) in rings {
+                for i in 0..segs {
+                    let a0 = (i as f32 / segs as f32) * std::f32::consts::TAU;
+                    let a1 = ((i + 1) as f32 / segs as f32) * std::f32::consts::TAU;
+                    let p0 = pivot.add(u_ax.mul(a0.cos() * scale)).add(v_ax.mul(a0.sin() * scale));
+                    let p1 = pivot.add(u_ax.mul(a1.cos() * scale)).add(v_ax.mul(a1.sin() * scale));
+                    let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                        project_to_screen(vp, p0, vw, vh),
+                        project_to_screen(vp, p1, vw, vh),
+                    ) else {
+                        continue;
+                    };
+                    let d = point_to_segment_dist(mx, my, sx0, sy0, sx1, sy1);
+                    let mid = p0.add(p1).mul(0.5).sub(pivot).norm();
+                    let front = mid.dot(to_cam);
+                    let max_d = if front >= -0.10 { 12.0 } else { 8.0 };
+                    if d <= max_d {
+                        let score = d + if front < -0.10 { 6.5 } else { 0.0 };
+                        if score < best_score {
+                            best_score = score;
+                            best_ring = axis_id;
+                        }
+                    }
+                }
             }
-        }
-    }
-    if best_axis != GizmoAxis::None {
-        return best_axis;
-    }
+            if best_ring != GizmoAxis::None {
+                return best_ring;
+            }
 
-    if let Some((rx, ry)) = project_to_screen(vp, pivot.add(cam_right.mul(ring_radius_world)), vw, vh) {
-        let ring_px = (rx - px).hypot(ry - py).max(12.0);
-        if (center_d - ring_px).abs() <= 9.0 {
-            return GizmoAxis::Roll;
+            if let Some((rx, ry)) = project_to_screen(vp, pivot.add(cam_right.mul(scale * 1.18)), vw, vh) {
+                let ring_px = (rx - px).hypot(ry - py).max(14.0);
+                if (center_d - ring_px).abs() <= 10.0 {
+                    return GizmoAxis::Roll;
+                }
+                if center_d <= (ring_px * 0.90).max(18.0) {
+                    return GizmoAxis::Free;
+                }
+            } else if center_d <= 18.0 {
+                return GizmoAxis::Free;
+            }
+            GizmoAxis::None
         }
-        if center_d < ring_px - 9.0 {
-            return GizmoAxis::Free;
+        ToolMode::Move => {
+            if center_d <= 15.0 {
+                return GizmoAxis::Free;
+            }
+            // Check 2D planar square handles (`[0.20..0.48] * scale`) first when facing camera
+            let (ro, rd) = screen_ray(inv_vp, mx, my, vw, vh);
+            let planes = [
+                (axes[0], axes[1], axes[2], GizmoAxis::XY),
+                (axes[0], axes[2], axes[1], GizmoAxis::XZ),
+                (axes[1], axes[2], axes[0], GizmoAxis::YZ),
+            ];
+            let mut best_plane = GizmoAxis::None;
+            let mut best_t = f32::MAX;
+            for (u_ax, v_ax, n_ax, pid) in planes {
+                if n_ax.dot(to_cam).abs() < 0.18 {
+                    continue;
+                }
+                if let Some(hit) = ray_plane_intersect(ro, rd, pivot, n_ax) {
+                    let rel = hit.sub(pivot);
+                    let u = rel.dot(u_ax) / scale;
+                    let v = rel.dot(v_ax) / scale;
+                    if (0.18..=0.50).contains(&u) && (0.18..=0.50).contains(&v) {
+                        let t = hit.sub(ro).len();
+                        if t < best_t {
+                            best_t = t;
+                            best_plane = pid;
+                        }
+                    }
+                }
+            }
+            if best_plane != GizmoAxis::None {
+                return best_plane;
+            }
+
+            let mut best_axis = GizmoAxis::None;
+            let mut best_d = 13.0f32;
+            let axis_ids = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
+            for i in 0..3 {
+                if let (Some((sx, sy)), Some((tx, ty))) = (
+                    project_to_screen(vp, pivot.add(axes[i].mul(0.08 * scale)), vw, vh),
+                    project_to_screen(vp, pivot.add(axes[i].mul(1.08 * scale)), vw, vh),
+                ) {
+                    let d = point_to_segment_dist(mx, my, sx, sy, tx, ty);
+                    if d < best_d {
+                        best_d = d;
+                        best_axis = axis_ids[i];
+                    }
+                }
+            }
+            best_axis
         }
+        ToolMode::Scale => {
+            if center_d <= 16.0 {
+                return GizmoAxis::Free;
+            }
+            let mut best_axis = GizmoAxis::None;
+            let mut best_d = 13.0f32;
+            let axis_ids = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
+            for i in 0..3 {
+                if let (Some((sx, sy)), Some((tx, ty))) = (
+                    project_to_screen(vp, pivot.add(axes[i].mul(0.08 * scale)), vw, vh),
+                    project_to_screen(vp, pivot.add(axes[i].mul(1.04 * scale)), vw, vh),
+                ) {
+                    let d = point_to_segment_dist(mx, my, sx, sy, tx, ty);
+                    if d < best_d {
+                        best_d = d;
+                        best_axis = axis_ids[i];
+                    }
+                }
+            }
+            best_axis
+        }
+        _ => GizmoAxis::None,
     }
-    GizmoAxis::None
 }
 
-/// Transform a bone using camera-relative screen motion or an explicit X/Y/Z/Roll handle.
+/// Transform a bone using ray-plane / axis-angle matrix composition (Rotate) or 1:1 ray lock (Move/Scale).
+/// Returns signed delta degrees for Rotate drags (used for live angle readout), or `0.0` for Move/Scale.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_gizmo_drag(
     tr: &mut BoneTransform,
@@ -163,11 +372,12 @@ pub fn apply_gizmo_drag(
     axis: GizmoAxis,
     axes: [Vec3; 3],
     parent_axes: [Vec3; 3],
-    bone_axes: [Vec3; 3],
     cam_right: Vec3,
     cam_up: Vec3,
     cam_fwd: Vec3,
     vp: Mat4,
+    inv_vp: Mat4,
+    eye: Vec3,
     vw: f32,
     vh: f32,
     pivot: Vec3,
@@ -175,16 +385,18 @@ pub fn apply_gizmo_drag(
     prev_my: f32,
     cur_mx: f32,
     cur_my: f32,
-) {
+) -> f32 {
     let dx = cur_mx - prev_mx;
     let dy = cur_my - prev_my;
     if dx.abs() < 1e-4 && dy.abs() < 1e-4 {
-        return;
+        return 0.0;
     }
+    let scale = gizmo_world_scale(eye, pivot);
 
     match tool {
         ToolMode::Move => {
-            // World-space movement converted to bone-parent MC pixels (remember pos[1] is negated UP!)
+            let (ro0, rd0) = screen_ray(inv_vp, prev_mx, prev_my, vw, vh);
+            let (ro1, rd1) = screen_ray(inv_vp, cur_mx, cur_my, vw, vh);
             let world_delta = match axis {
                 GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z => {
                     let ai = match axis {
@@ -192,43 +404,112 @@ pub fn apply_gizmo_drag(
                         GizmoAxis::Y => 1,
                         _ => 2,
                     };
-                    let sign_proj = if let (Some((px, py)), Some((tx, ty))) = (
+                    if let (Some(s0), Some(s1)) = (
+                        ray_closest_param_on_line(ro0, rd0, pivot, axes[ai]),
+                        ray_closest_param_on_line(ro1, rd1, pivot, axes[ai]),
+                    ) {
+                        axes[ai].mul((s1 - s0).clamp(-1.5, 1.5))
+                    } else if let (Some((px, py)), Some((tx, ty))) = (
                         project_to_screen(vp, pivot, vw, vh),
-                        project_to_screen(vp, pivot.add(axes[ai].mul(0.4)), vw, vh),
+                        project_to_screen(vp, pivot.add(axes[ai].mul(scale)), vw, vh),
+                    ) {
+                        let vx = tx - px;
+                        let vy = ty - py;
+                        let l = vx.hypot(vy).max(1.0);
+                        axes[ai].mul(((dx * vx + dy * vy) / l) * scale * 0.015)
+                    } else {
+                        Vec3::ZERO
+                    }
+                }
+                GizmoAxis::XY | GizmoAxis::XZ | GizmoAxis::YZ => {
+                    let n_ax = match axis {
+                        GizmoAxis::XY => axes[2],
+                        GizmoAxis::XZ => axes[1],
+                        _ => axes[0],
+                    };
+                    if let (Some(p0), Some(p1)) = (
+                        ray_plane_intersect(ro0, rd0, pivot, n_ax),
+                        ray_plane_intersect(ro1, rd1, pivot, n_ax),
+                    ) {
+                        let d = p1.sub(p0);
+                        if d.len() > 1.8 {
+                            d.norm().mul(1.8)
+                        } else {
+                            d
+                        }
+                    } else {
+                        cam_right.mul(dx * scale * 0.012).add(cam_up.mul(-dy * scale * 0.012))
+                    }
+                }
+                _ => {
+                    if let (Some(p0), Some(p1)) = (
+                        ray_plane_intersect(ro0, rd0, pivot, cam_fwd),
+                        ray_plane_intersect(ro1, rd1, pivot, cam_fwd),
+                    ) {
+                        let d = p1.sub(p0);
+                        if d.len() > 1.8 {
+                            d.norm().mul(1.8)
+                        } else {
+                            d
+                        }
+                    } else {
+                        cam_right.mul(dx * scale * 0.012).add(cam_up.mul(-dy * scale * 0.012))
+                    }
+                }
+            };
+            let px = world_delta.dot(parent_axes[0]) * 16.0;
+            let py = -world_delta.dot(parent_axes[1]) * 16.0;
+            let pz = world_delta.dot(parent_axes[2]) * 16.0;
+            tr.pos[0] = (tr.pos[0] + px).clamp(-64.0, 64.0);
+            tr.pos[1] = (tr.pos[1] + py).clamp(-64.0, 64.0);
+            tr.pos[2] = (tr.pos[2] + pz).clamp(-64.0, 64.0);
+            0.0
+        }
+        ToolMode::Scale => {
+            match axis {
+                GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z => {
+                    let ai = match axis {
+                        GizmoAxis::X => 0,
+                        GizmoAxis::Y => 1,
+                        _ => 2,
+                    };
+                    let proj = if let (Some((px, py)), Some((tx, ty))) = (
+                        project_to_screen(vp, pivot, vw, vh),
+                        project_to_screen(vp, pivot.add(axes[ai].mul(scale)), vw, vh),
                     ) {
                         let vx = tx - px;
                         let vy = ty - py;
                         let l = vx.hypot(vy).max(1.0);
                         (dx * vx + dy * vy) / l
                     } else {
-                        dx
+                        dx - dy
                     };
-                    axes[ai].mul(sign_proj * 0.0065)
+                    let factor = (1.0 + proj * 0.008).clamp(0.82, 1.22);
+                    tr.scale[ai] = (tr.scale[ai] * factor).clamp(0.10, 4.0);
                 }
-                _ => cam_right.mul(dx * 0.0052).add(cam_up.mul(-dy * 0.0052)),
-            };
-            let px = world_delta.dot(parent_axes[0]) * 16.0;
-            let py = -world_delta.dot(parent_axes[1]) * 16.0; // bone_local uses base_y - pos[1], axes[1] points down in MC
-            let pz = world_delta.dot(parent_axes[2]) * 16.0;
-            tr.pos[0] = (tr.pos[0] + px).clamp(-64.0, 64.0);
-            tr.pos[1] = (tr.pos[1] + py).clamp(-64.0, 64.0);
-            tr.pos[2] = (tr.pos[2] + pz).clamp(-64.0, 64.0);
-        }
-        ToolMode::Scale => {
-            match axis {
-                GizmoAxis::X => tr.scale[0] = (tr.scale[0] * (1.0 + dx * 0.006 - dy * 0.004)).clamp(0.10, 4.0),
-                GizmoAxis::Y => tr.scale[1] = (tr.scale[1] * (1.0 - dy * 0.006)).clamp(0.10, 4.0),
-                GizmoAxis::Z => tr.scale[2] = (tr.scale[2] * (1.0 + dx * 0.006 + dy * 0.004)).clamp(0.10, 4.0),
                 _ => {
-                    let factor = (1.0 + (dx - dy) * 0.005).clamp(0.85, 1.15);
+                    let factor = (1.0 + (dx - dy) * 0.006).clamp(0.85, 1.18);
                     for c in 0..3 {
                         tr.scale[c] = (tr.scale[c] * factor).clamp(0.10, 4.0);
                     }
                 }
             }
+            0.0
         }
         _ => {
-            // Rotate / Select-drag: camera-aligned arcball or explicit axis spin
+            // Exact matrix-composed 3D rotation around world or local ring axis / screen Roll / Trackball
+            let r_cur = Mat4::rot_zyx_deg(tr.rot[0], tr.rot[1], tr.rot[2]);
+            let apply_world_axis_angle = |u_world: Vec3, delta_rad: f32, prev: [f32; 3]| -> [f32; 3] {
+                let u_parent = Vec3::new(
+                    u_world.dot(parent_axes[0]),
+                    u_world.dot(parent_axes[1]),
+                    u_world.dot(parent_axes[2]),
+                )
+                .norm();
+                let r_new = Mat4::rot_axis_angle(u_parent, delta_rad).mul(r_cur);
+                decompose_zyx_continuous(r_new, prev)
+            };
+
             match axis {
                 GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z => {
                     let ai = match axis {
@@ -237,64 +518,83 @@ pub fn apply_gizmo_drag(
                         _ => 2,
                     };
                     let a_vec = axes[ai];
-                    let eye_dir = cam_fwd.mul(-1.0);
-                    let deg = if a_vec.dot(eye_dir).abs() > 0.85 {
-                        if let Some((px, py)) = project_to_screen(vp, pivot, vw, vh) {
-                            let a0 = (prev_my - py).atan2(prev_mx - px);
-                            let a1 = (cur_my - py).atan2(cur_mx - px);
-                            let mut da = a1 - a0;
-                            if da > std::f32::consts::PI { da -= std::f32::consts::TAU; }
-                            if da < -std::f32::consts::PI { da += std::f32::consts::TAU; }
-                            let sign = if a_vec.dot(eye_dir) >= 0.0 { -1.0 } else { 1.0 };
-                            da * (180.0 / std::f32::consts::PI) * sign
-                        } else {
-                            dx * 0.65
+                    let to_cam = eye.sub(pivot).norm();
+                    let mut delta_rad = 0.0f32;
+                    let mut used_plane = false;
+                    if a_vec.dot(to_cam).abs() >= 0.22 {
+                        let (ro0, rd0) = screen_ray(inv_vp, prev_mx, prev_my, vw, vh);
+                        let (ro1, rd1) = screen_ray(inv_vp, cur_mx, cur_my, vw, vh);
+                        if let (Some(p0), Some(p1)) = (
+                            ray_plane_intersect(ro0, rd0, pivot, a_vec),
+                            ray_plane_intersect(ro1, rd1, pivot, a_vec),
+                        ) {
+                            let d0 = p0.sub(pivot);
+                            let d1 = p1.sub(pivot);
+                            if d0.len() > 1e-4 && d1.len() > 1e-4 {
+                                let v0 = d0.norm();
+                                let v1 = d1.norm();
+                                delta_rad = a_vec.dot(v0.cross(v1)).atan2(v0.dot(v1));
+                                used_plane = true;
+                            }
                         }
-                    } else {
-                        let tangent = a_vec.cross(eye_dir).norm();
-                        if let (Some((px, py)), Some((tx, ty))) = (
+                    }
+                    if !used_plane {
+                        let tangent = a_vec.cross(to_cam).norm();
+                        delta_rad = if let (Some((px, py)), Some((tx, ty))) = (
                             project_to_screen(vp, pivot, vw, vh),
-                            project_to_screen(vp, pivot.add(tangent.mul(0.35)), vw, vh),
+                            project_to_screen(vp, pivot.add(tangent.mul(scale * 0.8)), vw, vh),
                         ) {
                             let vx = tx - px;
                             let vy = ty - py;
                             let l = vx.hypot(vy).max(1.0);
-                            ((dx * vx + dy * vy) / l) * 0.72
+                            (((dx * vx + dy * vy) / l) * 0.78) * DEG2RAD
                         } else {
-                            (dx - dy) * 0.55
-                        }
-                    };
-                    for bi in 0..3 {
-                        let proj = a_vec.dot(bone_axes[bi]);
-                        if proj.abs() > 1e-4 {
-                            tr.rot[bi] = (tr.rot[bi] + deg * proj).clamp(-720.0, 720.0);
-                        }
+                            ((dx - dy) * 0.55) * DEG2RAD
+                        };
                     }
+                    delta_rad = delta_rad.clamp(-0.65, 0.65);
+                    tr.rot = apply_world_axis_angle(a_vec, delta_rad, tr.rot);
+                    delta_rad.to_degrees()
                 }
                 GizmoAxis::Roll => {
-                    let deg = if let Some((px, py)) = project_to_screen(vp, pivot, vw, vh) {
+                    let da = if let Some((px, py)) = project_to_screen(vp, pivot, vw, vh) {
                         let a0 = (prev_my - py).atan2(prev_mx - px);
                         let a1 = (cur_my - py).atan2(cur_mx - px);
-                        let mut da = a1 - a0;
-                        if da > std::f32::consts::PI { da -= std::f32::consts::TAU; }
-                        if da < -std::f32::consts::PI { da += std::f32::consts::TAU; }
-                        -da * (180.0 / std::f32::consts::PI)
+                        let mut d = a1 - a0;
+                        if d > std::f32::consts::PI {
+                            d -= std::f32::consts::TAU;
+                        }
+                        if d < -std::f32::consts::PI {
+                            d += std::f32::consts::TAU;
+                        }
+                        -d
                     } else {
-                        dx * 0.65
-                    };
-                    let w_axis = cam_fwd.mul(-1.0);
-                    for ai in 0..3 {
-                        let proj = w_axis.dot(bone_axes[ai]);
-                        tr.rot[ai] = (tr.rot[ai] + deg * proj).clamp(-720.0, 720.0);
+                        dx * 0.011
                     }
+                    .clamp(-0.65, 0.65);
+                    tr.rot = apply_world_axis_angle(cam_fwd.mul(-1.0), da, tr.rot);
+                    da.to_degrees()
                 }
                 _ => {
-                    // Camera-relative free rotation: screen horizontal rotates around cam_up, screen vertical around cam_right
-                    let world_spin = cam_up.mul(dx * 0.65).add(cam_right.mul(dy * 0.65));
-                    for ai in 0..3 {
-                        let d = world_spin.dot(bone_axes[ai]);
-                        tr.rot[ai] = (tr.rot[ai] + d).clamp(-720.0, 720.0);
-                    }
+                    // Camera-relative free 3D trackball via exact axis-angle composition
+                    let up_p = Vec3::new(
+                        cam_up.dot(parent_axes[0]),
+                        cam_up.dot(parent_axes[1]),
+                        cam_up.dot(parent_axes[2]),
+                    )
+                    .norm();
+                    let rt_p = Vec3::new(
+                        cam_right.dot(parent_axes[0]),
+                        cam_right.dot(parent_axes[1]),
+                        cam_right.dot(parent_axes[2]),
+                    )
+                    .norm();
+                    let rx_rad = (dy * 0.011).clamp(-0.65, 0.65);
+                    let ry_rad = (dx * 0.011).clamp(-0.65, 0.65);
+                    let r_delta = Mat4::rot_axis_angle(up_p, ry_rad)
+                        .mul(Mat4::rot_axis_angle(rt_p, rx_rad));
+                    tr.rot = decompose_zyx_continuous(r_delta.mul(r_cur), tr.rot);
+                    0.0
                 }
             }
         }
@@ -419,6 +719,22 @@ impl Mat4 {
             .mul(Self::rot_x(rx * DEG2RAD))
     }
 
+    /// Arbitrary-axis right-handed Rodrigues rotation matrix (radians).
+    pub fn rot_axis_angle(axis: Vec3, rad: f32) -> Self {
+        let u = axis.norm();
+        let (s, c) = rad.sin_cos();
+        let t = 1.0 - c;
+        let (x, y, z) = (u.x, u.y, u.z);
+        Self {
+            m: [
+                t * x * x + c,     t * x * y + s * z, t * x * z - s * y, 0.0,
+                t * x * y - s * z, t * y * y + c,     t * y * z + s * x, 0.0,
+                t * x * z + s * y, t * y * z - s * x, t * z * z + c,     0.0,
+                0.0,               0.0,               0.0,               1.0,
+            ],
+        }
+    }
+
     /// WGPU depth 0..1 perspective matrix.
     pub fn perspective_wgpu(fov_rad: f32, aspect: f32, near: f32, far: f32) -> Self {
         let f = 1.0 / (fov_rad * 0.5).tan();
@@ -502,16 +818,37 @@ fn bone_local(base_x: f32, base_y: f32, base_z: f32, p: &BoneTransform) -> Mat4 
         .mul(Mat4::scale(p.scale[0].max(0.05), p.scale[1].max(0.05), p.scale[2].max(0.05)))
 }
 
-/// Evaluate exact world matrices for all 10 bones (`root` lifts/spins the whole character including legs).
-pub fn evaluate_rig_matrices(pose: &RigPose) -> [Mat4; BONE_COUNT] {
+/// Lowest world Y coordinate across all 8 corners of a leg mesh bounding box (`[-2.1..2.1, 0..12, -2.1..2.1]`).
+pub fn leg_lowest_world_y(leg_mat: Mat4) -> f32 {
+    let mut min_y = f32::INFINITY;
+    for &x in &[-2.1_f32, 2.1] {
+        for &y in &[0.0_f32, 12.0] {
+            for &z in &[-2.1_f32, 2.1] {
+                let wy = leg_mat.transform_point(Vec3::new(x, y, z)).y;
+                if wy < min_y {
+                    min_y = wy;
+                }
+            }
+        }
+    }
+    min_y
+}
+
+/// Lowest world Y across both boots (`right_leg` = 6, `left_leg` = 7).
+pub fn feet_lowest_world_y(mats: &[Mat4; BONE_COUNT]) -> f32 {
+    leg_lowest_world_y(mats[6]).min(leg_lowest_world_y(mats[7]))
+}
+
+/// Evaluate raw unclamped world matrices for all 10 bones.
+pub fn evaluate_rig_matrices_raw(pose: &RigPose) -> [Mat4; BONE_COUNT] {
     let root_world = mc_to_world();
     let root_mc = bone_local(0.0, 24.0, 0.0, pose.bone(8));
 
     let waist_mc = root_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(0)));
     let body_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(1)));
-    let head_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(2)));
-    let right_arm_mc = waist_mc.mul(bone_local(-5.0, -10.0, 0.0, pose.bone(3)));
-    let left_arm_mc = waist_mc.mul(bone_local(5.0, -10.0, 0.0, pose.bone(4)));
+    let head_mc = body_mc.mul(bone_local(0.0, 0.0, 0.0, pose.bone(2)));
+    let right_arm_mc = body_mc.mul(bone_local(-5.0, 2.0, 0.0, pose.bone(3)));
+    let left_arm_mc = body_mc.mul(bone_local(5.0, 2.0, 0.0, pose.bone(4)));
     let right_leg_mc = root_mc.mul(bone_local(-1.9, -12.0, 0.0, pose.bone(6)));
     let left_leg_mc = root_mc.mul(bone_local(1.9, -12.0, 0.0, pose.bone(7)));
 
@@ -532,12 +869,26 @@ pub fn evaluate_rig_matrices(pose: &RigPose) -> [Mat4; BONE_COUNT] {
     ]
 }
 
+/// Evaluate world matrices for all 10 bones, clamping feet cleanly at or above the ground (`y >= 0.0`).
+pub fn evaluate_rig_matrices(pose: &RigPose) -> [Mat4; BONE_COUNT] {
+    let mut mats = evaluate_rig_matrices_raw(pose);
+    let min_y = feet_lowest_world_y(&mats);
+    if min_y < 0.0 {
+        let lift = -min_y;
+        for m in &mut mats {
+            m.m[13] += lift;
+        }
+    }
+    mats
+}
+
 /// Parent world matrix of any bone index in the 10-bone hierarchy (used for accurate World/Local translations).
 pub fn bone_parent_world_matrix(bone_idx: usize, mats: &[Mat4; BONE_COUNT]) -> Mat4 {
     match bone_idx {
         8 => mc_to_world(),
         0 | 6 | 7 => mats[8],
-        1..=4 => mats[0],
+        1 => mats[0],
+        2..=4 => mats[1],
         5 => mats[3],
         9 => mats[4],
         _ => mats[8],
@@ -567,9 +918,7 @@ pub fn pick_bone_ray_point(
     let dir = p_far.sub(p_near).norm();
     if solo_weapon {
         let pivot = Vec3::new(0.0, 0.96, 0.0);
-        let denom = dir.dot(p_far.sub(p_near).norm());
         let dist = pivot.sub(p_near).len();
-        let _ = denom;
         return Some((5, p_near.add(dir.mul(dist))));
     }
 

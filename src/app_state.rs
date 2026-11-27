@@ -4,14 +4,15 @@ use crate::camera::ViewportCameraController;
 use crate::catalog;
 use crate::exporter::load_saved_project;
 use crate::math3d::{
-    bone_parent_world_matrix, evaluate_rig_matrices, gizmo_axes_for_space, matrix_axes_world,
-    GizmoAxis, Mat4, Vec3,
+    bone_parent_world_matrix, evaluate_rig_matrices, evaluate_rig_matrices_raw,
+    feet_lowest_world_y, gizmo_axes_for_space, leg_lowest_world_y, matrix_axes_world, GizmoAxis,
+    Mat4, Vec3,
 };
 use crate::model::{
     build_demo_presets, create_blank_clip, sample_clip_pose, snap_clip_to_fps, snap_time_to_fps,
-    AnimatorProject, BoneTransform, ClipDef, ClipSource, CurationStatus, EasingMode, GalleryGroup,
-    Keyframe, RigPose, SpritePixels, ToolMode, VfxKind, WeaponCategory, WeaponRecord,
-    ALL_BONES_MASK, BONE_COUNT,
+    AnimatorProject, BoneTransform, ClipDef, CurationStatus, EasingMode, GalleryGroup, Keyframe,
+    RigPose, SpritePixels, ToolMode, VfxKind, WeaponCategory, WeaponRecord, ALL_BONES_MASK,
+    BONE_COUNT,
 };
 use crate::modpack::{
     discover_servernuevo_root, load_all_combat_animations, load_curated_weapons, load_local_profile,
@@ -22,7 +23,7 @@ use crate::voxelizer::{
     build_character_bone_meshes_with_slim, build_skin_character_meshes, detect_skin_slim_heuristic,
 };
 use slint::{Color, Image, Rgba8Pixel, SharedPixelBuffer};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -33,6 +34,7 @@ const MAX_THUMB_CACHE: usize = 48;
 #[derive(Clone, Copy, Debug)]
 pub struct BoneClipFrame {
     pub dt: f32,
+    pub bone_idx: usize,
     pub easing: EasingMode,
     pub transform: BoneTransform,
 }
@@ -42,6 +44,7 @@ pub struct BoneClipboard {
     pub source_bone_idx: usize,
     pub frames: Vec<BoneClipFrame>,
     pub is_full_track: bool,
+    pub multi_bone: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +57,12 @@ pub struct DragSession {
     pub last_y: f32,
     pub undo_pushed: bool,
     pub active_gizmo: GizmoAxis,
+    pub drag_angle_deg: f32,
+    pub smooth_x: f32,
+    pub smooth_y: f32,
+    pub raw_tr: BoneTransform,
+    pub fine_mode: bool,
+    pub snap_mode: bool,
 }
 
 impl Default for DragSession {
@@ -67,6 +76,12 @@ impl Default for DragSession {
             last_y: 0.0,
             undo_pushed: false,
             active_gizmo: GizmoAxis::None,
+            drag_angle_deg: 0.0,
+            smooth_x: 0.0,
+            smooth_y: 0.0,
+            raw_tr: BoneTransform::IDENTITY,
+            fine_mode: false,
+            snap_mode: false,
         }
     }
 }
@@ -78,7 +93,6 @@ pub struct DirtyFlags {
     pub card_viewport: bool,
     pub catalog: bool,
     pub gallery: bool,
-    pub triad: bool,
     pub inspector: bool,
     pub transform_readout: bool,
     pub timeline_tracks: bool,
@@ -94,7 +108,6 @@ impl DirtyFlags {
             card_viewport: true,
             catalog: true,
             gallery: true,
-            triad: true,
             inspector: true,
             transform_readout: true,
             timeline_tracks: true,
@@ -107,7 +120,6 @@ impl DirtyFlags {
     pub fn any_ui(&self) -> bool {
         self.catalog
             || self.gallery
-            || self.triad
             || self.inspector
             || self.transform_readout
             || self.timeline_tracks
@@ -135,8 +147,6 @@ pub struct AppState {
     pub weapon_status_filter: i32,
     pub weapon_search: String,
     pub gallery_filter: i32,
-    pub gallery_source_filter: i32,
-    pub gallery_status_filter: i32,
     pub gallery_compat_only: bool,
     pub gallery_search: String,
     pub collapsed_gallery_groups: [bool; 5],
@@ -152,6 +162,8 @@ pub struct AppState {
     pub shadows: bool,
     pub onion: bool,
     pub trail: bool,
+    pub auto_crouch_knees: bool,
+    pub crouch_legs_driven: bool,
     pub bg_mode: i32,
     pub auto_keyframe: bool,
     pub show_all_bones: bool,
@@ -168,6 +180,10 @@ pub struct AppState {
     pub clipboard_bone: Option<BoneClipboard>,
     pub selected_range_bone: Option<usize>,
     pub selected_range_times: Option<(f32, f32)>,
+    pub selected_keys: BTreeSet<(i32, usize)>,
+    pub selection_anchor: Option<(i32, usize)>,
+    pub drag_group_origin_frame: Option<i32>,
+    pub drag_group_moved: bool,
     pub undo_stack: Vec<ClipDef>,
     pub redo_stack: Vec<ClipDef>,
 
@@ -381,8 +397,6 @@ impl AppState {
             weapon_status_filter: 0,
             weapon_search: String::new(),
             gallery_filter: 0,
-            gallery_source_filter: 0,
-            gallery_status_filter: 0,
             gallery_compat_only: false,
             gallery_search: String::new(),
             collapsed_gallery_groups: [false; 5],
@@ -395,8 +409,10 @@ impl AppState {
             show_offhand_weapon: false,
             solo_weapon: false,
             shadows: true,
-            onion: true,
-            trail: true,
+            onion: false,
+            trail: false,
+            auto_crouch_knees: true,
+            crouch_legs_driven: false,
             bg_mode: 0,
             auto_keyframe: true,
             show_all_bones: false,
@@ -411,6 +427,10 @@ impl AppState {
             clipboard_bone: None,
             selected_range_bone: None,
             selected_range_times: None,
+            selected_keys: BTreeSet::new(),
+            selection_anchor: None,
+            drag_group_origin_frame: None,
+            drag_group_moved: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             vp_size: (900, 520),
@@ -608,6 +628,454 @@ impl AppState {
     pub fn clear_bone_selection(&mut self) {
         self.selected_range_bone = None;
         self.selected_range_times = None;
+        self.selected_keys.clear();
+        self.selection_anchor = None;
+        self.drag_group_origin_frame = None;
+        self.drag_group_moved = false;
+    }
+
+    #[inline]
+    pub fn frame_idx_for_time(&self, t: f32) -> i32 {
+        let dur = self.active_clip().duration.max(0.05);
+        let total_f = self.active_total_frames().max(1) as f32;
+        ((t / dur).clamp(0.0, 1.0) * total_f).round() as i32
+    }
+
+    #[inline]
+    pub fn time_for_frame_idx(&self, frame: i32) -> f32 {
+        let dur = self.active_clip().duration.max(0.05);
+        let total_f = self.active_total_frames().max(1);
+        (frame.clamp(0, total_f) as f32 / total_f as f32) * dur
+    }
+
+    #[inline]
+    pub fn visible_timeline_bones(&self) -> &'static [usize] {
+        if self.show_all_bones {
+            &crate::model::DISPLAY_BONE_ORDER
+        } else {
+            &[8, 3, 4, 5]
+        }
+    }
+
+    pub fn sync_range_from_selected_keys(&mut self) {
+        if self.selected_keys.is_empty() {
+            self.selected_range_bone = None;
+            self.selected_range_times = None;
+            return;
+        }
+        let mut min_f = i32::MAX;
+        let mut max_f = i32::MIN;
+        let mut first_bone = None;
+        let mut single_bone = true;
+        for &(f, b) in &self.selected_keys {
+            min_f = min_f.min(f);
+            max_f = max_f.max(f);
+            match first_bone {
+                None => first_bone = Some(b),
+                Some(fb) if fb != b => single_bone = false,
+                _ => {}
+            }
+        }
+        self.selected_range_bone = if single_bone { first_bone } else { None };
+        self.selected_range_times = Some((self.time_for_frame_idx(min_f), self.time_for_frame_idx(max_f)));
+    }
+
+    pub fn effective_selected_keys(&self) -> BTreeSet<(i32, usize)> {
+        if !self.selected_keys.is_empty() {
+            return self.selected_keys.clone();
+        }
+        let mut out = BTreeSet::new();
+        if let (Some(rb), Some((t0, t1))) = (self.selected_range_bone, self.selected_range_times) {
+            let (lo, hi) = (t0.min(t1), t0.max(t1));
+            for k in &self.active_clip().keyframes {
+                if k.has_bone(rb) && k.time >= lo - 0.016 && k.time <= hi + 0.016 {
+                    out.insert((self.frame_idx_for_time(k.time), rb));
+                }
+            }
+        }
+        out
+    }
+
+    fn keyframe_bone_touched(clip: &ClipDef, ki: usize, kf: &Keyframe, bi: usize) -> bool {
+        if !kf.has_bone(bi) {
+            return false;
+        }
+        if kf.bone_mask != ALL_BONES_MASK || ki == 0 || ki + 1 == clip.keyframes.len() {
+            return true;
+        }
+        let t = kf.bones.bone(bi);
+        t.rot.iter().any(|x| x.abs() > 0.1)
+            || t.pos.iter().any(|x| x.abs() > 0.05)
+            || t.scale.iter().any(|x| (x - 1.0).abs() > 0.02)
+    }
+
+    pub fn select_keyframes_in_box(
+        &mut self,
+        min_frame: f32,
+        max_frame: f32,
+        min_track: i32,
+        max_track: i32,
+        additive: bool,
+    ) -> usize {
+        if !additive {
+            self.selected_keys.clear();
+        }
+        let visible = self.visible_timeline_bones();
+        if visible.is_empty() {
+            self.sync_range_from_selected_keys();
+            return 0;
+        }
+        let f_lo = min_frame.min(max_frame) - 0.35;
+        let f_hi = min_frame.max(max_frame) + 0.35;
+        let t_lo = min_track.min(max_track).max(0) as usize;
+        let t_hi = min_track.max(max_track).min((visible.len() - 1) as i32) as usize;
+        if t_lo <= t_hi && min_track.max(max_track) >= 0 && t_lo < visible.len() {
+            let mut found = Vec::new();
+            let dur = self.active_clip().duration.max(0.05);
+            let total_f = self.active_total_frames().max(1) as f32;
+            let clip = self.active_clip();
+            for (ki, kf) in clip.keyframes.iter().enumerate() {
+                let fi = ((kf.time / dur).clamp(0.0, 1.0) * total_f).round() as i32;
+                let ff = fi as f32;
+                if ff < f_lo || ff > f_hi {
+                    continue;
+                }
+                for &bi in &visible[t_lo..=t_hi] {
+                    if Self::keyframe_bone_touched(clip, ki, kf, bi) {
+                        found.push((fi, bi));
+                    }
+                }
+            }
+            for key in found {
+                self.selection_anchor.get_or_insert(key);
+                self.selected_keys.insert(key);
+            }
+        }
+        if let Some(&first) = self.selected_keys.iter().next() {
+            self.active_bone_idx = first.1;
+        }
+        self.sync_range_from_selected_keys();
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        self.dirty.inspector = true;
+        self.selected_keys.len()
+    }
+
+    pub fn select_all_visible_keyframes(&mut self) -> usize {
+        let total_f = self.active_total_frames().max(1) as f32;
+        let tracks_max = (self.visible_timeline_bones().len().saturating_sub(1)) as i32;
+        self.select_keyframes_in_box(0.0, total_f, 0, tracks_max, false)
+    }
+
+    pub fn select_rect_range(
+        &mut self,
+        anchor: (i32, usize),
+        target: (i32, usize),
+        additive: bool,
+    ) -> usize {
+        let visible = self.visible_timeline_bones();
+        let a_track = visible.iter().position(|&b| b == anchor.1).unwrap_or(0) as i32;
+        let b_track = visible.iter().position(|&b| b == target.1).unwrap_or(a_track as usize) as i32;
+        let f_lo = anchor.0.min(target.0) as f32;
+        let f_hi = anchor.0.max(target.0) as f32;
+        let count = self.select_keyframes_in_box(f_lo, f_hi, a_track, b_track, additive);
+        self.selection_anchor = Some(anchor);
+        count
+    }
+
+    pub fn move_selected_keys_by_frames(&mut self, delta_frames: i32, push_undo_now: bool) -> usize {
+        let sel = self.effective_selected_keys();
+        if sel.is_empty() || delta_frames == 0 {
+            return 0;
+        }
+        let fps = self.timeline_fps.max(1) as f32;
+        let dur = self.active_clip().duration.max(0.05);
+        let total_f = self.active_total_frames().max(1);
+        let min_f = sel.iter().map(|&(f, _)| f).min().unwrap_or(0);
+        let max_f = sel.iter().map(|&(f, _)| f).max().unwrap_or(0);
+        let actual_delta = delta_frames.clamp(-min_f, total_f - max_f);
+        if actual_delta == 0 {
+            return 0;
+        }
+
+        // Per-bone collision guard: forbid overwriting any unselected key on the same bone track.
+        let mut frame_kfs: HashMap<i32, usize> = HashMap::new();
+        for (ki, kf) in self.active_clip().keyframes.iter().enumerate() {
+            frame_kfs.insert(self.frame_idx_for_time(kf.time), ki);
+        }
+        for &(f, b) in &sel {
+            let dst_f = f + actual_delta;
+            if sel.contains(&(dst_f, b)) {
+                continue;
+            }
+            if let Some(&ki) = frame_kfs.get(&dst_f) {
+                if self.active_clip().keyframes[ki].has_bone(b) {
+                    return 0;
+                }
+            }
+        }
+
+        let mut snapshot: Vec<(usize, i32, usize, EasingMode, BoneTransform)> = Vec::new();
+        for &(f, b) in &sel {
+            if let Some(&ki) = frame_kfs.get(&f) {
+                let kf = &self.active_clip().keyframes[ki];
+                if kf.has_bone(b) {
+                    snapshot.push((ki, f + actual_delta, b, kf.easing, kf.bones.0[b]));
+                }
+            }
+        }
+        if snapshot.is_empty() {
+            return 0;
+        }
+
+        // Follow impact marker if all moved keyframes at impact frame belong to the selection
+        let new_impact_t = self.active_clip().impact_time.and_then(|imp| {
+            let imp_f = self.frame_idx_for_time(imp);
+            snapshot
+                .iter()
+                .any(|&(_, dst_f, _, _, _)| dst_f - actual_delta == imp_f)
+                .then(|| self.time_for_frame_idx(imp_f + actual_delta))
+        });
+
+        if push_undo_now {
+            self.push_undo();
+        }
+        {
+            let clip = self.active_clip_mut();
+            for &(ki, _, b, _, _) in &snapshot {
+                if let Some(kf) = clip.keyframes.get_mut(ki) {
+                    kf.set_bone(b, false);
+                    kf.bones.0[b] = BoneTransform::IDENTITY;
+                }
+            }
+        }
+        let mut next_sel = BTreeSet::new();
+        for &(_, dst_f, b, ease, tr) in &snapshot {
+            let dst_t = self.time_for_frame_idx(dst_f);
+            let ki = self.ensure_bone_kf_at(dst_t, b, ease);
+            let kf = &mut self.active_clip_mut().keyframes[ki];
+            kf.bones.0[b] = tr;
+            kf.easing = ease;
+            kf.set_bone(b, true);
+            next_sel.insert((dst_f, b));
+        }
+        {
+            let clip = self.active_clip_mut();
+            if let Some(imp_t) = new_impact_t {
+                clip.impact_time = Some(imp_t);
+            }
+            let mut idx = clip.keyframes.len();
+            while idx > 0 && clip.keyframes.len() > 2 {
+                idx -= 1;
+                if clip.keyframes[idx].bone_mask == 0 {
+                    clip.keyframes.remove(idx);
+                }
+            }
+        }
+
+        self.selected_keys = next_sel;
+        if let Some((af, ab)) = self.selection_anchor {
+            self.selection_anchor = Some(((af + actual_delta).clamp(0, total_f), ab));
+        }
+        if let Some(orig) = self.drag_group_origin_frame {
+            self.drag_group_origin_frame = Some((orig + actual_delta).clamp(0, total_f));
+        }
+        self.sync_range_from_selected_keys();
+        self.current_time =
+            snap_time_to_fps((self.current_time + actual_delta as f32 / fps).clamp(0.0, dur), dur, fps);
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.transform_readout = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        snapshot.len()
+    }
+
+    pub fn delete_selected_keyframes(&mut self) -> usize {
+        let sel = self.effective_selected_keys();
+        if sel.is_empty() {
+            return 0;
+        }
+        let mut targets: Vec<(usize, usize)> = Vec::new();
+        for (ki, kf) in self.active_clip().keyframes.iter().enumerate() {
+            let fi = self.frame_idx_for_time(kf.time);
+            for b in 0..BONE_COUNT {
+                if kf.has_bone(b) && sel.contains(&(fi, b)) {
+                    targets.push((ki, b));
+                }
+            }
+        }
+        if targets.is_empty() {
+            return 0;
+        }
+        self.push_undo();
+        let clip = self.active_clip_mut();
+        for &(ki, b) in &targets {
+            if let Some(kf) = clip.keyframes.get_mut(ki) {
+                kf.set_bone(b, false);
+                kf.bones.0[b] = BoneTransform::IDENTITY;
+            }
+        }
+        let mut idx = clip.keyframes.len();
+        while idx > 0 && clip.keyframes.len() > 2 {
+            idx -= 1;
+            if clip.keyframes[idx].bone_mask == 0 {
+                clip.keyframes.remove(idx);
+            }
+        }
+        self.clear_bone_selection();
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        targets.len()
+    }
+
+    pub fn copy_selected_keyframes(&mut self) -> usize {
+        let sel = self.effective_selected_keys();
+        if sel.is_empty() {
+            return 0;
+        }
+        let mut raw: Vec<(f32, usize, EasingMode, BoneTransform)> = Vec::new();
+        for kf in &self.active_clip().keyframes {
+            let fi = self.frame_idx_for_time(kf.time);
+            for b in 0..BONE_COUNT {
+                if kf.has_bone(b) && sel.contains(&(fi, b)) {
+                    raw.push((kf.time, b, kf.easing, kf.bones.0[b]));
+                }
+            }
+        }
+        if raw.is_empty() {
+            return 0;
+        }
+        raw.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let base_t = raw[0].0;
+        let first_bone = raw[0].1;
+        let mut unique_bones = BTreeSet::new();
+        let mut frames = Vec::with_capacity(raw.len());
+        for (t, b, ease, tr) in raw {
+            unique_bones.insert(b);
+            frames.push(BoneClipFrame {
+                dt: (t - base_t).max(0.0),
+                bone_idx: b,
+                easing: ease,
+                transform: tr,
+            });
+        }
+        let count = frames.len();
+        self.clipboard_bone = Some(BoneClipboard {
+            source_bone_idx: first_bone,
+            frames,
+            is_full_track: false,
+            multi_bone: unique_bones.len() > 1,
+        });
+        count
+    }
+
+    pub fn duplicate_selected_keyframes(&mut self) -> usize {
+        let sel = self.effective_selected_keys();
+        let target: BTreeSet<(i32, usize)> = if !sel.is_empty() {
+            sel
+        } else {
+            let fi = self.frame_idx_for_time(self.current_time);
+            if self.timeline_bone_scope {
+                let mut s = BTreeSet::new();
+                s.insert((fi, self.active_bone_idx.min(BONE_COUNT - 1)));
+                s
+            } else {
+                let mut s = BTreeSet::new();
+                for &bi in self.visible_timeline_bones() {
+                    s.insert((fi, bi));
+                }
+                s
+            }
+        };
+        let mut entries: Vec<(i32, usize, EasingMode, BoneTransform)> = Vec::new();
+        for &(fi, b) in &target {
+            let t = self.time_for_frame_idx(fi);
+            if let Some(kf) = self
+                .active_clip()
+                .keyframes
+                .iter()
+                .find(|k| self.frame_idx_for_time(k.time) == fi && k.has_bone(b))
+            {
+                entries.push((fi, b, kf.easing, kf.bones.0[b]));
+            } else {
+                let pose = sample_clip_pose(self.active_clip(), t);
+                entries.push((fi, b, EasingMode::EaseOut, pose.0[b]));
+            }
+        }
+        if entries.is_empty() {
+            return 0;
+        }
+        let min_f = entries.iter().map(|&(f, _, _, _)| f).min().unwrap_or(0);
+        let max_f = entries.iter().map(|&(f, _, _, _)| f).max().unwrap_or(0);
+        let shift = (max_f - min_f).max(0) + 1;
+        let fps = self.timeline_fps.max(1) as f32;
+        let total_f = self.active_total_frames().max(1);
+        let needed_f = (max_f + shift).min(300);
+
+        self.push_undo();
+        if needed_f > total_f {
+            let new_dur = needed_f as f32 / fps;
+            self.active_clip_mut().duration = new_dur;
+        }
+        let mut next_sel = BTreeSet::new();
+        for &(f, b, ease, tr) in &entries {
+            let dst_f = (f + shift).min(300);
+            let dst_t = self.time_for_frame_idx(dst_f);
+            let ki = self.ensure_bone_kf_at(dst_t, b, ease);
+            let kf = &mut self.active_clip_mut().keyframes[ki];
+            kf.bones.0[b] = tr;
+            kf.easing = ease;
+            kf.set_bone(b, true);
+            next_sel.insert((dst_f, b));
+        }
+        self.selected_keys = next_sel;
+        self.selection_anchor = self.selected_keys.iter().next().copied();
+        self.sync_range_from_selected_keys();
+        self.current_time = self.time_for_frame_idx((min_f + shift).min(300));
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        entries.len()
+    }
+
+    pub fn set_easing_for_selection(&mut self, easing: EasingMode) -> usize {
+        let sel = self.effective_selected_keys();
+        if sel.is_empty() {
+            self.push_undo();
+            let ki = self.ensure_kf_at_current();
+            self.active_clip_mut().keyframes[ki].easing = easing;
+            self.mark_active_clip_modified();
+            self.dirty.main_viewport = true;
+            self.dirty.inspector = true;
+            return 1;
+        }
+        let frames: BTreeSet<i32> = sel.iter().map(|&(f, _)| f).collect();
+        let dur = self.active_clip().duration.max(0.05);
+        let total_f = self.active_total_frames().max(1) as f32;
+        self.push_undo();
+        let mut count = 0usize;
+        for kf in &mut self.active_clip_mut().keyframes {
+            let fi = ((kf.time / dur).clamp(0.0, 1.0) * total_f).round() as i32;
+            if frames.contains(&fi) {
+                kf.easing = easing;
+                count += 1;
+            }
+        }
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        count
     }
 
     pub fn ensure_bone_kf_at(&mut self, time: f32, bone_idx: usize, easing: EasingMode) -> usize {
@@ -736,109 +1204,112 @@ impl AppState {
             if let Some(first) = kfs.first() {
                 let base = first.time;
                 for k in kfs {
+                frames.push(BoneClipFrame {
+                    dt: (k.time - base).max(0.0),
+                    bone_idx: b_idx,
+                    easing: k.easing,
+                    transform: k.bones.0[b_idx],
+                });
+            }
+        } else {
+            let pose = sample_clip_pose(clip, self.current_time);
+            frames.push(BoneClipFrame {
+                dt: 0.0,
+                bone_idx: b_idx,
+                easing: EasingMode::EaseOut,
+                transform: pose.0[b_idx],
+            });
+        }
+    } else if self.selected_range_bone == Some(b_idx) {
+        if let Some((t0, t1)) = self.selected_range_times {
+            let lo = t0.min(t1);
+            let hi = t0.max(t1);
+            let mut kfs: Vec<&Keyframe> = clip
+                .keyframes
+                .iter()
+                .filter(|k| k.has_bone(b_idx) && k.time >= lo - 0.016 && k.time <= hi + 0.016)
+                .collect();
+            kfs.sort_by(|a, b| a.time.total_cmp(&b.time));
+            if let Some(first) = kfs.first() {
+                let base = first.time;
+                for k in kfs {
                     frames.push(BoneClipFrame {
                         dt: (k.time - base).max(0.0),
+                        bone_idx: b_idx,
                         easing: k.easing,
                         transform: k.bones.0[b_idx],
                     });
                 }
-            } else {
-                let pose = sample_clip_pose(clip, self.current_time);
-                frames.push(BoneClipFrame {
-                    dt: 0.0,
-                    easing: EasingMode::EaseOut,
-                    transform: pose.0[b_idx],
-                });
-            }
-        } else if self.selected_range_bone == Some(b_idx) {
-            if let Some((t0, t1)) = self.selected_range_times {
-                let lo = t0.min(t1);
-                let hi = t0.max(t1);
-                let mut kfs: Vec<&Keyframe> = clip
-                    .keyframes
-                    .iter()
-                    .filter(|k| k.has_bone(b_idx) && k.time >= lo - 0.016 && k.time <= hi + 0.016)
-                    .collect();
-                kfs.sort_by(|a, b| a.time.total_cmp(&b.time));
-                if let Some(first) = kfs.first() {
-                    let base = first.time;
-                    for k in kfs {
-                        frames.push(BoneClipFrame {
-                            dt: (k.time - base).max(0.0),
-                            easing: k.easing,
-                            transform: k.bones.0[b_idx],
-                        });
-                    }
-                }
             }
         }
-
-        if frames.is_empty() {
-            let cur_t = self.current_time;
-            let pose = sample_clip_pose(clip, cur_t);
-            let easing = clip
-                .keyframes
-                .iter()
-                .filter(|k| k.has_bone(b_idx))
-                .min_by(|a, b| (a.time - cur_t).abs().total_cmp(&(b.time - cur_t).abs()))
-                .map(|k| k.easing)
-                .unwrap_or(EasingMode::EaseOut);
-            frames.push(BoneClipFrame {
-                dt: 0.0,
-                easing,
-                transform: pose.0[b_idx],
-            });
-        }
-
-        let count = frames.len();
-        self.clipboard_bone = Some(BoneClipboard {
-            source_bone_idx: b_idx,
-            frames,
-            is_full_track: full_track,
-        });
-        count
     }
 
-    /// Paste copied bone frame(s) onto `target_bone_idx` starting at playhead (0.0s for full track near start).
-    pub fn paste_bone_frames(&mut self, target_bone_idx: usize, mirror_lr: bool) -> usize {
-        let Some(cb) = self.clipboard_bone.clone() else {
-            return 0;
-        };
-        let b_idx = target_bone_idx.min(BONE_COUNT - 1);
-        self.push_undo();
-        let dur = self.active_clip().duration.max(0.05);
-        let base_t = if cb.is_full_track && self.current_time < 0.016 {
-            0.0
-        } else {
-            self.current_time
-        };
-        let mut first_dst: Option<f32> = None;
-        let mut last_dst: Option<f32> = None;
-        let fps = self.timeline_fps.max(1) as f32;
-        for f in &cb.frames {
-            let dst_t = snap_time_to_fps(base_t + f.dt, dur, fps);
-            let mut tr = f.transform;
-            if mirror_lr {
-                tr.pos[0] = -tr.pos[0];
-                tr.rot[1] = -tr.rot[1];
-                tr.rot[2] = -tr.rot[2];
-            }
-            let ki = self.ensure_bone_kf_at(dst_t, b_idx, f.easing);
-            let kf = &mut self.active_clip_mut().keyframes[ki];
-            kf.bones.0[b_idx] = tr;
-            kf.easing = f.easing;
-            kf.set_bone(b_idx, true);
-            first_dst.get_or_insert(dst_t);
-            last_dst = Some(dst_t);
+    if frames.is_empty() {
+        let cur_t = self.current_time;
+        let pose = sample_clip_pose(clip, cur_t);
+        let easing = clip
+            .keyframes
+            .iter()
+            .filter(|k| k.has_bone(b_idx))
+            .min_by(|a, b| (a.time - cur_t).abs().total_cmp(&(b.time - cur_t).abs()))
+            .map(|k| k.easing)
+            .unwrap_or(EasingMode::EaseOut);
+        frames.push(BoneClipFrame {
+            dt: 0.0,
+            bone_idx: b_idx,
+            easing,
+            transform: pose.0[b_idx],
+        });
+    }
+
+    let count = frames.len();
+    self.clipboard_bone = Some(BoneClipboard {
+        source_bone_idx: b_idx,
+        frames,
+        is_full_track: full_track,
+        multi_bone: false,
+    });
+    count
+}
+
+/// Paste copied bone frame(s) onto `target_bone_idx` starting at playhead (0.0s for full track near start).
+pub fn paste_bone_frames(&mut self, target_bone_idx: usize, mirror_lr: bool) -> usize {
+    let Some(cb) = self.clipboard_bone.clone() else {
+        return 0;
+    };
+    let b_idx = target_bone_idx.min(BONE_COUNT - 1);
+    self.push_undo();
+    let dur = self.active_clip().duration.max(0.05);
+    let base_t = if cb.is_full_track && self.current_time < 0.016 {
+        0.0
+    } else {
+        self.current_time
+    };
+    let mut pasted_keys = BTreeSet::new();
+    let fps = self.timeline_fps.max(1) as f32;
+    for f in &cb.frames {
+        let dst_b = if cb.multi_bone { f.bone_idx.min(BONE_COUNT - 1) } else { b_idx };
+        let dst_t = snap_time_to_fps(base_t + f.dt, dur, fps);
+        let mut tr = f.transform;
+        if mirror_lr && !cb.multi_bone {
+            tr.pos[0] = -tr.pos[0];
+            tr.rot[1] = -tr.rot[1];
+            tr.rot[2] = -tr.rot[2];
         }
-        if cb.frames.len() > 1 {
-            if let (Some(a), Some(b)) = (first_dst, last_dst) {
-                self.selected_range_bone = Some(b_idx);
-                self.selected_range_times = Some((a.min(b), a.max(b)));
-            }
-        } else {
-            self.clear_bone_selection();
-        }
+        let ki = self.ensure_bone_kf_at(dst_t, dst_b, f.easing);
+        let kf = &mut self.active_clip_mut().keyframes[ki];
+        kf.bones.0[dst_b] = tr;
+        kf.easing = f.easing;
+        kf.set_bone(dst_b, true);
+        pasted_keys.insert((self.frame_idx_for_time(dst_t), dst_b));
+    }
+    if pasted_keys.len() > 1 {
+        self.selected_keys = pasted_keys;
+        self.selection_anchor = self.selected_keys.iter().next().copied();
+        self.sync_range_from_selected_keys();
+    } else {
+        self.clear_bone_selection();
+    }
         self.mark_active_clip_modified();
         self.dirty.main_viewport = true;
         self.dirty.inspector = true;
@@ -967,8 +1438,11 @@ impl AppState {
     }
 
     /// Pack consecutive keyframe gaps tighter (`compact == true`) or spread them apart (`compact == false`),
-    /// targeting either the Shift-selected range, active bone track (`bone_only`), or full-body clip.
+    /// targeting either the active multi-selection, Shift-selected range, active bone track, or full-body clip.
     pub fn pack_or_spread_keyframes(&mut self, compact: bool, bone_only: bool) -> usize {
+        if self.selected_keys.len() > 1 {
+            return self.pack_or_spread_selected_keys(compact);
+        }
         let fps = self.timeline_fps.max(1) as f32;
         let b_idx = self.active_bone_idx.min(BONE_COUNT - 1);
         let mut dur = self.active_clip().duration.max(0.05);
@@ -1066,8 +1540,117 @@ impl AppState {
         matched.len()
     }
 
+    fn pack_or_spread_selected_keys(&mut self, compact: bool) -> usize {
+        let sel = self.selected_keys.clone();
+        let old_frames: Vec<i32> = sel
+            .iter()
+            .map(|&(f, _)| f)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if old_frames.len() < 2 {
+            return 0;
+        }
+        let mut new_frames = Vec::with_capacity(old_frames.len());
+        new_frames.push(old_frames[0]);
+        for k in 1..old_frames.len() {
+            let gap = (old_frames[k] - old_frames[k - 1]).max(1);
+            let next_gap = if compact {
+                if gap <= 1 {
+                    1
+                } else if gap <= 3 {
+                    gap - 1
+                } else {
+                    ((gap as f32) * 0.72).floor().max(1.0) as i32
+                }
+            } else {
+                gap + 1
+            };
+            new_frames.push(new_frames[k - 1] + next_gap);
+        }
+        if new_frames == old_frames {
+            return 0;
+        }
+        let remap: HashMap<i32, i32> = old_frames.into_iter().zip(new_frames.iter().copied()).collect();
+        let mut frame_kfs: HashMap<i32, usize> = HashMap::new();
+        for (ki, kf) in self.active_clip().keyframes.iter().enumerate() {
+            frame_kfs.insert(self.frame_idx_for_time(kf.time), ki);
+        }
+        for &(f, b) in &sel {
+            let dst_f = *remap.get(&f).unwrap_or(&f);
+            if !sel.contains(&(dst_f, b)) {
+                if let Some(&ki) = frame_kfs.get(&dst_f) {
+                    if self.active_clip().keyframes[ki].has_bone(b) {
+                        return 0;
+                    }
+                }
+            }
+        }
+        let mut snapshot: Vec<(usize, i32, usize, EasingMode, BoneTransform)> = Vec::new();
+        for &(f, b) in &sel {
+            let dst_f = *remap.get(&f).unwrap_or(&f);
+            if let Some(&ki) = frame_kfs.get(&f) {
+                let kf = &self.active_clip().keyframes[ki];
+                if kf.has_bone(b) {
+                    snapshot.push((ki, dst_f, b, kf.easing, kf.bones.0[b]));
+                }
+            }
+        }
+        if snapshot.is_empty() {
+            return 0;
+        }
+        let fps = self.timeline_fps.max(1) as f32;
+        let total_f = self.active_total_frames().max(1);
+        let max_new = *new_frames.last().unwrap_or(&total_f);
+        self.push_undo();
+        if max_new > total_f {
+            self.active_clip_mut().duration = max_new.min(300) as f32 / fps;
+        }
+        {
+            let clip = self.active_clip_mut();
+            for &(ki, _, b, _, _) in &snapshot {
+                if let Some(kf) = clip.keyframes.get_mut(ki) {
+                    kf.set_bone(b, false);
+                    kf.bones.0[b] = BoneTransform::IDENTITY;
+                }
+            }
+        }
+        let mut next_sel = BTreeSet::new();
+        for &(_, dst_f, b, ease, tr) in &snapshot {
+            let dst_t = self.time_for_frame_idx(dst_f);
+            let ki = self.ensure_bone_kf_at(dst_t, b, ease);
+            let kf = &mut self.active_clip_mut().keyframes[ki];
+            kf.bones.0[b] = tr;
+            kf.easing = ease;
+            kf.set_bone(b, true);
+            next_sel.insert((dst_f, b));
+        }
+        {
+            let clip = self.active_clip_mut();
+            let mut idx = clip.keyframes.len();
+            while idx > 0 && clip.keyframes.len() > 2 {
+                idx -= 1;
+                if clip.keyframes[idx].bone_mask == 0 {
+                    clip.keyframes.remove(idx);
+                }
+            }
+        }
+        self.selected_keys = next_sel;
+        self.sync_range_from_selected_keys();
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        snapshot.len()
+    }
+
     /// Shift selected keyframe(s) (or keyframe under playhead) by `delta_frames` (`±1f`).
     pub fn nudge_keyframes(&mut self, delta_frames: i32, bone_only: bool) -> usize {
+        if !self.selected_keys.is_empty() {
+            return self.move_selected_keys_by_frames(delta_frames, true);
+        }
         if delta_frames == 0 {
             return 0;
         }
@@ -1160,7 +1743,7 @@ impl AppState {
     }
 
     pub fn focus_active_bone(&mut self) {
-        let (pivot, _, _, _, _) = self.active_gizmo_geom();
+        let (pivot, _, _, _, _, _, _) = self.active_gizmo_geom();
         // Offset toward mid-limb center when a limb is selected (arms/legs extend downward from shoulder/hip pivot)
         let center_offset = match self.active_bone_idx {
             3 | 4 | 9 => Vec3::new(0.0, -0.22, 0.0),
@@ -1182,10 +1765,45 @@ impl AppState {
         self.dirty.main_viewport = true;
     }
 
-    /// Return `(pivot, gizmo_axes, parent_axes, bone_axes, vp)` in world space for the selected bone.
-    pub fn active_gizmo_geom(&self) -> (Vec3, [Vec3; 3], [Vec3; 3], [Vec3; 3], Mat4) {
-        let aspect = (self.vp_size.0 as f32 / self.vp_size.1.max(1) as f32).max(0.5);
-        let (vp, _, _) = self.main_cam.current.vp_and_inv(aspect);
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_viewport_scroll(
+        &mut self,
+        mx: f32,
+        my: f32,
+        vw: f32,
+        vh: f32,
+        dx: f32,
+        dy: f32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) {
+        if shift && !ctrl {
+            self.main_cam.pan_smooth(dx * 1.15, dy * 1.15, 0.0018);
+            self.dirty.main_viewport = true;
+        } else if alt && !ctrl {
+            self.main_cam
+                .orbit_smooth(-dx * 0.9, -dy * 0.9, 0.0075, 0.0068, -1.25, 1.48);
+            self.dirty.main_viewport = true;
+        } else if !ctrl && !shift && !alt && dx.abs() > dy.abs() * 1.6 && dx.abs() > 0.6 {
+            self.main_cam
+                .orbit_smooth(-dx * 0.75, 0.0, 0.0075, 0.0068, -1.25, 1.48);
+            self.dirty.main_viewport = true;
+        } else {
+            let eff_dy = if dy.abs() > 0.01 { dy } else { dx };
+            let scaled = if ctrl { eff_dy * 1.25 } else { eff_dy };
+            self.queue_zoom_at_cursor(mx, my, vw, vh, scaled);
+        }
+    }
+
+    /// Return `(pivot, gizmo_axes, parent_axes, bone_axes, vp, inv_vp, eye)` using exact viewport aspect.
+    pub fn active_gizmo_geom_for_size(
+        &self,
+        vw: f32,
+        vh: f32,
+    ) -> (Vec3, [Vec3; 3], [Vec3; 3], [Vec3; 3], Mat4, Mat4, Vec3) {
+        let aspect = (vw / vh.max(1.0)).max(0.5);
+        let (vp, inv_vp, eye) = self.main_cam.current.vp_and_inv(aspect);
         let pose = if self.is_active_clip_compatible() {
             sample_clip_pose(self.active_clip(), self.current_time)
         } else {
@@ -1215,7 +1833,11 @@ impl AppState {
         } else {
             matrix_axes_world(bone_parent_world_matrix(bone_idx, &mats))
         };
-        (pivot, gizmo_axes, parent_axes, bone_axes, vp)
+        (pivot, gizmo_axes, parent_axes, bone_axes, vp, inv_vp, eye)
+    }
+
+    pub fn active_gizmo_geom(&self) -> (Vec3, [Vec3; 3], [Vec3; 3], [Vec3; 3], Mat4, Mat4, Vec3) {
+        self.active_gizmo_geom_for_size(self.vp_size.0 as f32, self.vp_size.1 as f32)
     }
 
     pub fn rebuild_weapon_filter(&mut self) {
@@ -1337,28 +1959,12 @@ impl AppState {
                     5 => c.gallery_group == GalleryGroup::Interaccion,
                     _ => true,
                 };
-                let src_ok = match self.gallery_source_filter {
-                    1 => c.source == ClipSource::RellSeas,
-                    2 => c.source == ClipSource::BetterCombat,
-                    3 => c.source == ClipSource::SimplySwords,
-                    4 => c.source == ClipSource::CombatRoll,
-                    5 => c.source == ClipSource::FluidFoolish,
-                    6 => c.source == ClipSource::Personalizado,
-                    _ => true,
-                };
-                let st_ok = match self.gallery_status_filter {
-                    1 => c.status == CurationStatus::Pendiente,
-                    2 => c.status == CurationStatus::Aprobada,
-                    3 => c.status == CurationStatus::Mejorar,
-                    4 => c.status == CurationStatus::Descartada,
-                    _ => true,
-                };
                 let compat_ok = !self.gallery_compat_only || c.allows_weapon(active_w);
                 let q_ok = gq.is_empty()
                     || c.name.to_ascii_lowercase().contains(&gq)
                     || c.id.to_ascii_lowercase().contains(&gq)
                     || c.target_badge().to_ascii_lowercase().contains(&gq);
-                grp_ok && src_ok && st_ok && compat_ok && q_ok
+                grp_ok && compat_ok && q_ok
             })
             .map(|(i, _)| i)
             .collect()
@@ -1589,6 +2195,7 @@ impl AppState {
                 show_onion: false,
                 show_trail: true,
                 show_gizmo: false,
+                tool_mode: ToolMode::Rotate,
                 gizmo_world_space: true,
                 show_offhand_weapon: false,
                 bg_mode: 0.0,
@@ -1743,12 +2350,96 @@ impl AppState {
         true
     }
 
+    /// Simulate knee-bend crouch legs whenever the user lowers `waist` (0) or `body` (1).
+    pub fn sync_crouch_knees_if_enabled(&mut self, ki: usize, edited_bone: usize) {
+        if edited_bone == 6 || edited_bone == 7 {
+            self.crouch_legs_driven = false;
+            return;
+        }
+        if !self.auto_crouch_knees || (edited_bone != 0 && edited_bone != 1) {
+            return;
+        }
+        let Some(kf_ref) = self.active_clip().keyframes.get(ki) else {
+            return;
+        };
+        let w = kf_ref.bones.0[0];
+        let b = kf_ref.bones.0[1];
+        let tx = w.pos[0] + b.pos[0];
+        let tz = w.pos[2] + b.pos[2];
+        let drop = (-(w.pos[1] + b.pos[1])).clamp(0.0, 8.0);
+        if drop > 0.05 {
+            let t = (drop / 6.0).clamp(0.0, 1.0);
+            let scale_y = 1.0 - (drop / 8.0) * 0.08;
+            let cos_a = ((12.0 - drop) / (12.0 * scale_y)).clamp(0.35, 1.0);
+            let bend_deg = cos_a.acos().to_degrees();
+            let kf = &mut self.active_clip_mut().keyframes[ki];
+            kf.bones.0[6] = BoneTransform {
+                pos: [tx, -drop, tz],
+                rot: [-bend_deg, 10.0 * t, 6.0 * t],
+                scale: [1.0, scale_y, 1.0],
+            };
+            kf.set_bone(6, true);
+            kf.bones.0[7] = BoneTransform {
+                pos: [tx, -drop, tz],
+                rot: [bend_deg, -10.0 * t, -6.0 * t],
+                scale: [1.0, scale_y, 1.0],
+            };
+            kf.set_bone(7, true);
+            self.crouch_legs_driven = true;
+            self.dirty.timeline_diamonds = true;
+        } else if self.crouch_legs_driven {
+            let kf = &mut self.active_clip_mut().keyframes[ki];
+            kf.bones.0[6] = BoneTransform::IDENTITY;
+            kf.bones.0[7] = BoneTransform::IDENTITY;
+            self.crouch_legs_driven = false;
+            self.dirty.timeline_diamonds = true;
+        }
+        self.clamp_edited_bone_above_floor(ki, edited_bone);
+    }
+
+    /// Prevent feet (`right_leg` / `left_leg`) from dipping below `y = 0.0` during edits.
+    pub fn clamp_edited_bone_above_floor(&mut self, ki: usize, edited_bone: usize) -> bool {
+        let Some(kf_ref) = self.active_clip().keyframes.get(ki) else {
+            return false;
+        };
+        let mats = evaluate_rig_matrices_raw(&kf_ref.bones);
+        if edited_bone == 6 || edited_bone == 7 {
+            let y_min = leg_lowest_world_y(mats[edited_bone]);
+            if y_min < 0.0 {
+                let tr = &mut self.active_clip_mut().keyframes[ki].bones.0[edited_bone];
+                tr.pos[1] = (tr.pos[1] + (-y_min * 16.0)).clamp(-64.0, 64.0);
+                return true;
+            }
+            return false;
+        }
+        if edited_bone == 8 {
+            let y_min = feet_lowest_world_y(&mats);
+            if y_min < 0.0 {
+                let tr = &mut self.active_clip_mut().keyframes[ki].bones.0[8];
+                tr.pos[1] = (tr.pos[1] + (-y_min * 16.0)).clamp(-64.0, 64.0);
+                return true;
+            }
+            return false;
+        }
+        let mut adjusted = false;
+        for leg in [6usize, 7usize] {
+            let y_min = leg_lowest_world_y(mats[leg]);
+            if y_min < 0.0 {
+                let tr = &mut self.active_clip_mut().keyframes[ki].bones.0[leg];
+                tr.pos[1] = (tr.pos[1] + (-y_min * 16.0)).clamp(-64.0, 64.0);
+                adjusted = true;
+            }
+        }
+        adjusted
+    }
+
     pub fn reset_to_blank_scene(&mut self) {
         self.project = AnimatorProject {
             version: 1,
             clips: vec![create_blank_clip(1)],
         };
         self.active_clip_idx = 0;
+        self.crouch_legs_driven = false;
         self.current_time = 0.0;
         self.playing = false;
         self.undo_stack.clear();
@@ -1780,6 +2471,7 @@ impl AppState {
         }
         if added > 0 {
             self.active_clip_idx = first_added_idx.min(self.project.clips.len().saturating_sub(1));
+            self.crouch_legs_driven = false;
             self.current_time = 0.0;
             self.playing = false;
             self.gallery_thumbs.clear();
@@ -1823,7 +2515,6 @@ impl AppState {
 
         if self.main_cam.step_damping(dt) {
             self.dirty.main_viewport = true;
-            self.dirty.triad = true;
         }
 
         if self.playing {
@@ -1953,6 +2644,7 @@ impl AppState {
                     show_onion: compatible && self.onion,
                     show_trail: compatible && self.trail,
                     show_gizmo: self.show_gizmo && matches!(self.tool_mode, ToolMode::Rotate | ToolMode::Scale | ToolMode::Move),
+                    tool_mode: self.tool_mode,
                     gizmo_world_space: self.gizmo_world_space,
                     show_offhand_weapon: self.show_offhand_weapon,
                     bg_mode: self.bg_mode as f32,
@@ -1992,6 +2684,7 @@ impl AppState {
                     show_onion: false,
                     show_trail: false,
                     show_gizmo: false,
+                    tool_mode: ToolMode::Rotate,
                     gizmo_world_space: true,
                     show_offhand_weapon: false,
                     bg_mode: 0.0,
@@ -2054,6 +2747,7 @@ pub fn export_storyboard_strip(state: &mut AppState) -> Result<PathBuf, String> 
                 show_onion: false,
                 show_trail: true,
                 show_gizmo: false,
+                tool_mode: ToolMode::Rotate,
                 gizmo_world_space: true,
                 show_offhand_weapon: false,
                 bg_mode: 0.0,

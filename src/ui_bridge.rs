@@ -3,9 +3,7 @@
 
 use crate::app_state::{bone_color, detect_workspace_root, export_storyboard_strip, AppState, DragSession};
 use crate::design_spec::spec_for_theme;
-use crate::exporter::{
-    export_curated_weapons_final, export_project, export_rell_seas_f3t, ExportFormat,
-};
+use crate::exporter::{export_project, export_rell_seas_f3t, ExportFormat};
 use crate::math3d::{
     apply_gizmo_drag, camera_basis, evaluate_rig_matrices, pick_bone_ray, pick_gizmo_handle,
     GizmoAxis,
@@ -13,12 +11,12 @@ use crate::math3d::{
 use crate::model::{
     mirror_pose, next_keyframe_time, prev_keyframe_time, sample_clip_pose, ClipDef,
     CurationStatus, EasingMode, GalleryGroup, Keyframe, ToolMode, VfxEvent, VfxKind,
-    WeaponCategory, BONE_COUNT, BONE_LABELS_ES, BONE_NAMES, DISPLAY_BONE_ORDER,
+    WeaponCategory, BONE_COUNT, BONE_LABELS_ES, DISPLAY_BONE_ORDER,
 };
 use crate::renderer3d::GpuRenderer;
 use crate::{
-    CategoryEntry, CategoryRow, FamilyChipRow, GalleryItem, GalleryRow, MainWindow, PaletteEntry,
-    RulerTick, Theme, TimelineDiamond, TimelineTrack, VfxEventItem, WeaponListItem,
+    CategoryEntry, FamilyChipRow, GalleryItem, GalleryRow, MainWindow, PaletteEntry, RulerTick,
+    Theme, TimelineDiamond, TimelineTrack, VfxEventItem, WeaponListItem,
 };
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowExtWindows};
 use slint::winit_030::WinitWindowAccessor;
@@ -75,6 +73,7 @@ fn sync_theme_and_prefs(state: &AppState, win: &MainWindow) {
     win.set_gpu_low_power(state.gpu_low_power);
     win.set_focus_mode(state.focus_mode);
     win.set_show_gizmo(state.show_gizmo);
+    win.set_auto_crouch_knees(state.auto_crouch_knees);
 }
 
 fn build_palette_entries(state: &AppState) -> Vec<PaletteEntry> {
@@ -135,12 +134,33 @@ fn sync_status_pill(state: &AppState, win: &MainWindow) {
     } else {
         format!(" · {}", hl_axis.label_es())
     };
+    let angle_suffix = if state.drag.active
+        && state.tool_mode == ToolMode::Rotate
+        && state.drag.drag_angle_deg.abs() > 0.05
+    {
+        format!(" ({:+.1}°)", state.drag.drag_angle_deg)
+    } else {
+        String::new()
+    };
+    let mod_suffix = if state.drag.active && state.drag.active_gizmo != GizmoAxis::None {
+        if state.drag.fine_mode {
+            " · Precisión"
+        } else if state.drag.snap_mode {
+            " · Snap"
+        } else {
+            ""
+        }
+    } else {
+        ""
+    };
     win.set_status_pill(
         format!(
-            "{} · {}{}",
+            "{} · {}{}{}{}",
             BONE_LABELS_ES[state.active_bone_idx.min(BONE_COUNT - 1)],
             tool_lbl,
-            axis_suffix
+            axis_suffix,
+            angle_suffix,
+            mod_suffix
         )
         .into(),
     );
@@ -162,26 +182,6 @@ fn sync_catalog(state: &AppState, win: &MainWindow) {
         })
         .collect();
     win.set_categories(ModelRc::new(VecModel::from(cats)));
-
-    let rows: Vec<CategoryRow> = WeaponCategory::ALL_FAMILIES
-        .chunks_exact(2)
-        .enumerate()
-        .map(|(pair_idx, pair)| {
-            let left_cat = pair[0];
-            let right_cat = pair[1];
-            let left_count = state.weapons.iter().filter(|w| w.category == left_cat).count() as i32;
-            let right_count = state.weapons.iter().filter(|w| w.category == right_cat).count() as i32;
-            CategoryRow {
-                left_idx: (pair_idx * 2 + 1) as i32,
-                left_name: left_cat.short_label().into(),
-                left_count,
-                right_idx: (pair_idx * 2 + 2) as i32,
-                right_name: right_cat.short_label().into(),
-                right_count,
-            }
-        })
-        .collect();
-    win.set_category_rows(ModelRc::new(VecModel::from(rows)));
     win.set_total_weapon_count(state.weapons.len() as i32);
 
     let list: Vec<WeaponListItem> = state
@@ -329,11 +329,7 @@ fn sync_gallery(state: &AppState, win: &MainWindow) {
     win.set_gallery_content_h((cursor_y + 4.0).max(200.0));
 
     win.set_gallery_compat_only(state.gallery_compat_only);
-    win.set_gallery_source_filter(state.gallery_source_filter);
-    win.set_gallery_status_filter(state.gallery_status_filter);
     win.set_featured_gallery_id(clip.id.clone().into());
-    win.set_featured_gallery_name(clip.name.clone().into());
-    win.set_featured_gallery_thumb(state.gallery_thumbs.get(&clip.id).cloned().unwrap_or_default());
 }
 
 /// Lightweight per-frame / scrub / step readout sync: updates only active bone numbers & KF badge without rebuilding VFX or counting modpack items.
@@ -355,7 +351,6 @@ fn sync_transform_readout(state: &AppState, win: &MainWindow) {
     win.set_scl_y(format!("{:.2}", tr.scale[1]).into());
     win.set_scl_z(format!("{:.2}", tr.scale[2]).into());
 
-    let kf_count = clip.keyframes.len().max(1);
     let exact_kf = clip
         .keyframes
         .iter()
@@ -374,12 +369,6 @@ fn sync_transform_readout(state: &AppState, win: &MainWindow) {
     });
     if let Some(nk) = clip.keyframes.get(nearest_kf_idx) {
         win.set_easing_idx(nk.easing.index());
-    }
-    win.set_selected_kf_idx(nearest_kf_idx as i32);
-    if exact_kf.is_some() {
-        win.set_kf_badge(format!("KF {}/{}", nearest_kf_idx + 1, kf_count).into());
-    } else {
-        win.set_kf_badge(format!("~{}/{} KF", nearest_kf_idx + 1, kf_count).into());
     }
 }
 
@@ -415,16 +404,13 @@ fn sync_inspector(state: &AppState, win: &MainWindow) {
     win.set_active_weapon_name(w.name.clone().into());
     win.set_active_weapon_mod(w.mod_source.clone().into());
     win.set_active_weapon_family(w.category.label().into());
-    win.set_active_weapon_class(w.weapon_class.clone().into());
     win.set_active_weapon_status(w.status.index());
-    win.set_active_weapon_bc_arch(w.bc_archetype.clone().into());
     win.set_solo_weapon(state.solo_weapon);
 
     let clip = state.active_clip();
     let dur = clip.duration.max(0.05);
     win.set_active_clip_name(clip.name.clone().into());
     win.set_active_clip_status(clip.status.index());
-    win.set_active_clip_source(clip.source.label().into());
     win.set_active_clip_compatible(clip.allows_weapon(w));
     win.set_active_clip_targets(clip.target_summary(&state.weapons).into());
     win.set_active_clip_universal(clip.is_universal());
@@ -465,7 +451,6 @@ fn sync_inspector(state: &AppState, win: &MainWindow) {
         .collect();
     win.set_clip_vfx_events(ModelRc::new(VecModel::from(vfx_rows)));
     win.set_anim_loop(clip.looped);
-    win.set_duration_val(dur);
     win.set_duration_text(format!("{dur:.2}").into());
     win.set_speed_label(
         format!("{:.2}x", state.speed)
@@ -477,6 +462,7 @@ fn sync_inspector(state: &AppState, win: &MainWindow) {
     win.set_shadows_enabled(state.shadows);
     win.set_onion_enabled(state.onion);
     win.set_trail_enabled(state.trail);
+    win.set_auto_crouch_knees(state.auto_crouch_knees);
     win.set_bg_idx(state.bg_mode);
     win.set_auto_keyframe(state.auto_keyframe);
     win.set_show_all_bones(state.show_all_bones);
@@ -539,14 +525,16 @@ fn sync_timeline_meta(state: &AppState, win: &MainWindow) {
     win.set_timeline_bone_scope(state.timeline_bone_scope);
     if let Some(ref cb) = state.clipboard_bone {
         win.set_bone_clipboard_count(cb.frames.len() as i32);
-        win.set_bone_clipboard_label(
+        let lbl = if cb.multi_bone {
+            format!("Multi ({}k)", cb.frames.len())
+        } else {
             format!(
                 "{} ({}f)",
                 BONE_LABELS_ES[cb.source_bone_idx.min(BONE_COUNT - 1)],
                 cb.frames.len()
             )
-            .into(),
-        );
+        };
+        win.set_bone_clipboard_label(lbl.into());
     } else {
         win.set_bone_clipboard_count(0);
         win.set_bone_clipboard_label("".into());
@@ -866,14 +854,12 @@ fn sync_timeline_diamonds(state: &AppState, win: &MainWindow) {
     let scroll_f = state
         .timeline_scroll_frame
         .clamp(0.0, state.max_scroll_frame(lane_w));
-    let visible_bones: &[usize] = if state.show_all_bones {
-        &DISPLAY_BONE_ORDER
-    } else {
-        &[8, 3, 4, 5]
-    };
+    let sel_keys = state.effective_selected_keys();
+    let visible_bones: &[usize] = state.visible_timeline_bones();
     let mut diamonds = Vec::new();
     for (ki, kf) in clip.keyframes.iter().enumerate() {
         let kf_pos = (kf.time / dur).clamp(0.0, 1.0) * total_frames;
+        let kf_frame = kf_pos.round() as i32;
         let screen_frac = frame_to_screen_frac(kf_pos, scroll_f, vis_f);
         if !(-0.025..=1.025).contains(&screen_frac) {
             continue;
@@ -896,14 +882,11 @@ fn sync_timeline_diamonds(state: &AppState, win: &MainWindow) {
                 || t.pos.iter().any(|x| x.abs() > 0.05)
                 || t.scale.iter().any(|x| (x - 1.0).abs() > 0.02);
             if touched {
-                let in_range = state.selected_range_bone == Some(bi)
-                    && state.selected_range_times.map_or(false, |(t0, t1)| {
-                        kf.time >= t0.min(t1) - 0.016 && kf.time <= t0.max(t1) + 0.016
-                    });
-                let is_sel = in_range
-                    || (state.selected_range_bone.is_none()
-                        && (kf.time - state.current_time).abs() < 0.016
-                        && state.active_bone_idx == bi);
+                let is_sel = if !sel_keys.is_empty() {
+                    sel_keys.contains(&(kf_frame, bi))
+                } else {
+                    (kf.time - state.current_time).abs() < 0.016 && state.active_bone_idx == bi
+                };
                 diamonds.push(TimelineDiamond {
                     kf_idx: ki as i32,
                     track_idx: ti as i32,
@@ -915,6 +898,7 @@ fn sync_timeline_diamonds(state: &AppState, win: &MainWindow) {
             }
         }
     }
+    win.set_selected_keys_count(sel_keys.len() as i32);
     if let (Some(rb), Some((t0, t1))) = (state.selected_range_bone, state.selected_range_times) {
         let (lo, hi) = (t0.min(t1), t0.max(t1));
         let count = clip
@@ -985,7 +969,6 @@ pub fn sync_dirty_ui(state: &mut AppState, win: &MainWindow) {
         sync_gallery(state, win);
         state.dirty.gallery = false;
     }
-    state.dirty.triad = false;
     if state.dirty.status_pill {
         sync_status_pill(state, win);
         state.dirty.status_pill = false;
@@ -1033,6 +1016,7 @@ pub fn wire_ui_and_gpu(
     let thumb_timer = Rc::new(slint::Timer::default());
     let redraw_queued = Rc::new(Cell::new(false));
     let any_bench = bench_window || bench_orbit_zoom;
+    let is_interactive_startup = !any_bench && auto_capture_path.is_none();
 
     {
         let t_ref = toast_timer.clone();
@@ -1062,14 +1046,12 @@ pub fn wire_ui_and_gpu(
 
     {
         let s_ref = save_timer.clone();
-        let s_ref_inner = save_timer.clone();
         let st = state.clone();
         let w_weak = win.as_weak();
         SAVE_WAKE.with(|c| {
             *c.borrow_mut() = Some(Rc::new(move || {
                 let st2 = st.clone();
                 let w2 = w_weak.clone();
-                let sr = s_ref_inner.clone();
                 s_ref.start(
                     slint::TimerMode::SingleShot,
                     std::time::Duration::from_millis(400),
@@ -1085,7 +1067,6 @@ pub fn wire_ui_and_gpu(
                             || s.main_cam.is_actively_zooming()
                             || s.last_interaction_at.elapsed().as_millis() < 350
                         {
-                            let _ = &sr;
                             wake_save();
                         } else {
                             s.flush_profile_if_dirty(false);
@@ -1152,7 +1133,36 @@ pub fn wire_ui_and_gpu(
                 slint::RenderingState::RenderingSetup => {
                     win.window().with_winit_window(|ww| {
                         ww.set_corner_preference(CornerPreference::Round);
+                        if is_interactive_startup {
+                            ww.set_minimized(false);
+                            ww.set_visible(true);
+                            if let Some(mon) = ww.current_monitor().or_else(|| ww.primary_monitor()) {
+                                let sf = mon.scale_factor().max(0.5);
+                                let mon_pos = mon.position();
+                                let mon_sz = mon.size();
+                                let mw = mon_sz.width as f64 / sf;
+                                let mh = mon_sz.height as f64 / sf;
+                                if mw <= 1560.0 || mh <= 920.0 {
+                                    ww.set_maximized(true);
+                                } else {
+                                    let target_w = 1440.0_f64;
+                                    let target_h = 890.0_f64;
+                                    let _ = ww.request_inner_size(
+                                        slint::winit_030::winit::dpi::LogicalSize::new(target_w, target_h),
+                                    );
+                                    let phys_w = (target_w * sf).round() as i32;
+                                    let phys_h = (target_h * sf).round() as i32;
+                                    let ox = mon_pos.x + ((mon_sz.width as i32 - phys_w) / 2).max(0);
+                                    let oy = mon_pos.y + ((mon_sz.height as i32 - phys_h) / 2).max(0);
+                                    ww.set_outer_position(
+                                        slint::winit_030::winit::dpi::PhysicalPosition::new(ox, oy),
+                                    );
+                                }
+                            }
+                            ww.focus_window();
+                        }
                     });
+                    win.set_is_maximized(win.window().is_maximized());
                     let (imgs, low_power) = {
                         let Ok(mut s) = st.try_borrow_mut() else { return };
                         if s.gpu.is_none() {
@@ -1526,21 +1536,24 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
-        win.on_vp_pointer_down(move |x, y, btn, mod_pan, mod_ctrl, vw, vh| {
+        win.on_vp_pointer_down(move |x, y, btn, shift, alt, ctrl, vw, vh| {
             let Some(w) = w_weak.upgrade() else { return };
             let mut s = st.borrow_mut();
             let mut active_gizmo = GizmoAxis::None;
-            if btn == 0 && !mod_pan && !mod_ctrl && vw > 1.0 && vh > 1.0 {
-                let (pivot, axes, _, _, vp) = s.active_gizmo_geom();
+            let mod_cam = shift || alt || ctrl;
+            if btn == 0 && !mod_cam && vw > 1.0 && vh > 1.0 {
+                let (pivot, axes, _, _, vp, inv_vp, eye) = s.active_gizmo_geom_for_size(vw, vh);
                 let (cam_r, _, _) =
                     camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
                 let gizmo_shown =
                     s.show_gizmo && matches!(s.tool_mode, ToolMode::Rotate | ToolMode::Scale | ToolMode::Move);
                 if gizmo_shown {
                     active_gizmo =
-                        pick_gizmo_handle(x, y, vp, vw, vh, pivot, axes, cam_r, 0.42, 0.425);
+                        pick_gizmo_handle(s.tool_mode, x, y, vp, inv_vp, vw, vh, pivot, axes, cam_r, eye);
                 }
             }
+            let b_idx = if s.solo_weapon { 5 } else { s.active_bone_idx.min(BONE_COUNT - 1) };
+            let raw_tr = sample_clip_pose(s.active_clip(), s.current_time).0[b_idx];
             s.drag = DragSession {
                 active: true,
                 button: btn,
@@ -1550,7 +1563,14 @@ pub fn wire_ui_and_gpu(
                 last_y: y,
                 undo_pushed: false,
                 active_gizmo,
+                drag_angle_deg: 0.0,
+                smooth_x: x,
+                smooth_y: y,
+                raw_tr,
+                fine_mode: shift,
+                snap_mode: ctrl,
             };
+            s.dirty.status_pill = true;
             sync_dirty_ui(&mut s, &w);
             w.window().request_redraw();
         });
@@ -1576,9 +1596,10 @@ pub fn wire_ui_and_gpu(
                 }
                 return;
             }
-            let (pivot, axes, _, _, vp) = s.active_gizmo_geom();
+            let (pivot, axes, _, _, vp, inv_vp, eye) = s.active_gizmo_geom_for_size(vw, vh);
             let (cam_r, _, _) = camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
-            let next_hl = pick_gizmo_handle(x, y, vp, vw, vh, pivot, axes, cam_r, 0.42, 0.425);
+            let next_hl =
+                pick_gizmo_handle(s.tool_mode, x, y, vp, inv_vp, vw, vh, pivot, axes, cam_r, eye);
             if next_hl != s.hovered_gizmo {
                 s.hovered_gizmo = next_hl;
                 s.dirty.main_viewport = true;
@@ -1592,7 +1613,7 @@ pub fn wire_ui_and_gpu(
         let st = state.clone();
         let w_weak = win.as_weak();
         let rq = redraw_queued.clone();
-        win.on_vp_pointer_move(move |x, y, mod_pan, mod_ctrl, vw, vh| {
+        win.on_vp_pointer_move(move |x, y, shift, alt, ctrl, vw, vh| {
             let Some(w) = w_weak.upgrade() else { return };
             let mut s = st.borrow_mut();
             if !s.drag.active {
@@ -1609,69 +1630,114 @@ pub fn wire_ui_and_gpu(
                 && s.drag.active_gizmo != GizmoAxis::None
                 && s.show_gizmo
                 && matches!(s.tool_mode, ToolMode::Rotate | ToolMode::Scale | ToolMode::Move)
-                && !mod_pan
-                && !mod_ctrl;
+                && !alt;
 
-            if mod_ctrl {
+            if !is_bone_edit && ctrl {
                 s.note_interaction();
-                s.main_cam.dolly_drag(dy);
+                s.main_cam.dolly_smooth(dy);
                 s.dirty.main_viewport = true;
                 request_coalesced_redraw(&w, &rq);
                 return;
             }
 
             if is_bone_edit && ((x - s.drag.start_x).hypot(y - s.drag.start_y) > 2.0) {
-                if !s.drag.undo_pushed {
-                    s.push_undo();
-                    s.drag.undo_pushed = true;
-                }
-                s.playing = false;
-                let (pivot, axes, parent_axes, bone_axes, vp) = s.active_gizmo_geom();
-                let (cam_r, cam_u, cam_f) =
-                    camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
                 let axis = s.drag.active_gizmo;
                 let tmode = s.tool_mode;
-                let ki = s.editable_kf_index();
                 let b_idx = if s.solo_weapon {
                     5
                 } else {
                     s.active_bone_idx.min(BONE_COUNT - 1)
                 };
-                let tr = s.active_clip_mut().keyframes[ki].bones.bone_mut(b_idx);
-                apply_gizmo_drag(
-                    tr,
+                if !s.drag.undo_pushed {
+                    s.push_undo();
+                    s.drag.undo_pushed = true;
+                    let cur_kf = s.editable_kf_index();
+                    s.drag.raw_tr = *s.active_clip().keyframes[cur_kf].bones.bone(b_idx);
+                }
+                s.playing = false;
+                s.drag.fine_mode = shift;
+                s.drag.snap_mode = ctrl;
+
+                // Adaptive low-pass filter on raw pointer input + Shift 0.25x micro-precision
+                let alpha = if shift { 0.36 } else { 0.62 };
+                let prev_sx = s.drag.smooth_x;
+                let prev_sy = s.drag.smooth_y;
+                let next_sx = prev_sx + (x - prev_sx) * alpha;
+                let next_sy = prev_sy + (y - prev_sy) * alpha;
+                s.drag.smooth_x = next_sx;
+                s.drag.smooth_y = next_sy;
+                let fine_mul = if shift { 0.25 } else { 1.0 };
+                let eff_x = prev_sx + (next_sx - prev_sx) * fine_mul;
+                let eff_y = prev_sy + (next_sy - prev_sy) * fine_mul;
+
+                let (pivot, axes, parent_axes, _, vp, inv_vp, eye) =
+                    s.active_gizmo_geom_for_size(vw, vh);
+                let (cam_r, cam_u, cam_f) =
+                    camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
+                let delta_deg = apply_gizmo_drag(
+                    &mut s.drag.raw_tr,
                     tmode,
                     axis,
                     axes,
                     parent_axes,
-                    bone_axes,
                     cam_r,
                     cam_u,
                     cam_f,
                     vp,
+                    inv_vp,
+                    eye,
                     vw.max(1.0),
                     vh.max(1.0),
                     pivot,
-                    prev_x,
-                    prev_y,
-                    x,
-                    y,
+                    prev_sx,
+                    prev_sy,
+                    eff_x,
+                    eff_y,
                 );
+                let mut applied = s.drag.raw_tr;
+                if ctrl {
+                    match tmode {
+                        ToolMode::Rotate | ToolMode::Select => {
+                            for v in &mut applied.rot {
+                                *v = (*v / 15.0).round() * 15.0;
+                            }
+                        }
+                        ToolMode::Move => {
+                            for v in &mut applied.pos {
+                                *v = v.round();
+                            }
+                        }
+                        ToolMode::Scale => {
+                            for v in &mut applied.scale {
+                                *v = (*v * 10.0).round() / 10.0;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let ki = s.editable_kf_index();
+                *s.active_clip_mut().keyframes[ki].bones.bone_mut(b_idx) = applied;
+                s.sync_crouch_knees_if_enabled(ki, b_idx);
+                if s.clamp_edited_bone_above_floor(ki, b_idx) {
+                    s.drag.raw_tr = *s.active_clip().keyframes[ki].bones.bone(b_idx);
+                }
+                s.drag.drag_angle_deg += delta_deg;
                 s.note_interaction();
                 s.dirty.main_viewport = true;
                 s.dirty.transform_readout = true;
+                s.dirty.status_pill = true;
                 sync_dirty_ui(&mut s, &w);
                 request_coalesced_redraw(&w, &rq);
             } else if s.drag.button == 2
-                || ((s.drag.button == 1 || s.drag.button == 0) && mod_pan)
+                || ((s.drag.button == 1 || s.drag.button == 0) && (shift || alt))
             {
                 s.note_interaction();
-                s.main_cam.pan(dx, dy, 0.0018);
+                s.main_cam.pan_smooth(dx, dy, 0.0018);
                 s.dirty.main_viewport = true;
                 request_coalesced_redraw(&w, &rq);
             } else {
                 s.note_interaction();
-                s.main_cam.orbit(dx, dy, 0.009, 0.008, -1.25, 1.48);
+                s.main_cam.orbit_smooth(dx, dy, 0.008, 0.0072, -1.25, 1.48);
                 s.dirty.main_viewport = true;
                 request_coalesced_redraw(&w, &rq);
             }
@@ -1718,11 +1784,11 @@ pub fn wire_ui_and_gpu(
         let st = state.clone();
         let w_weak = win.as_weak();
         let rq = redraw_queued.clone();
-        win.on_vp_wheel(move |mx, my, vw, vh, dy| {
+        win.on_vp_wheel(move |mx, my, vw, vh, dx, dy, ctrl, shift, alt| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
                 s.note_interaction();
-                s.queue_zoom_at_cursor(mx, my, vw, vh, dy);
+                s.queue_viewport_scroll(mx, my, vw, vh, dx, dy, ctrl, shift, alt);
                 request_coalesced_redraw(&w, &rq);
             }
         });
@@ -1746,7 +1812,6 @@ pub fn wire_ui_and_gpu(
                 let mut s = st.borrow_mut();
                 s.main_cam.reset_main_smooth();
                 s.dirty.main_viewport = true;
-                s.dirty.triad = true;
                 sync_dirty_ui(&mut s, &w);
                 w.window().request_redraw();
             }
@@ -1760,7 +1825,6 @@ pub fn wire_ui_and_gpu(
                 let mut s = st.borrow_mut();
                 s.main_cam.set_main_preset(p);
                 s.dirty.main_viewport = true;
-                s.dirty.triad = true;
                 sync_dirty_ui(&mut s, &w);
                 w.window().request_redraw();
             }
@@ -1814,24 +1878,6 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
-        win.on_jump_edge(move |edge| {
-            if let Some(w) = w_weak.upgrade() {
-                let mut s = st.borrow_mut();
-                s.note_interaction();
-                s.playing = false;
-                s.current_time = if edge == 0 { 0.0 } else { s.active_clip().duration };
-                s.dirty.main_viewport = true;
-                s.dirty.transform_readout = true;
-                s.dirty.timeline_meta = true;
-                s.update_exact_kf_dirty();
-                sync_dirty_ui(&mut s, &w);
-                request_immediate_redraw(&w);
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        let w_weak = win.as_weak();
         win.on_cycle_speed(move || {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
@@ -1850,6 +1896,7 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
+        let rq = redraw_queued.clone();
         win.on_scrub_timeline(move |screen_frac| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
@@ -1868,23 +1915,23 @@ pub fn wire_ui_and_gpu(
                 s.dirty.timeline_meta = true;
                 s.update_exact_kf_dirty();
                 sync_dirty_ui(&mut s, &w);
-                request_immediate_redraw(&w);
+                request_coalesced_redraw(&w, &rq);
             }
         });
     }
     {
         let st = state.clone();
         let w_weak = win.as_weak();
-        win.on_zoom_timeline(move |delta, anchor_screen_frac| {
+        win.on_zoom_timeline(move |delta, anchor_screen_frac, is_button| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
-                let factor = if delta.abs() > 10.0 {
-                    1.25_f32.powf(delta / 120.0)
+                let factor = if is_button {
+                    1.28_f32.powf(delta.signum())
                 } else {
-                    1.35_f32.powf(delta)
+                    (delta * 0.0022).clamp(-0.32, 0.32).exp()
                 };
                 let mut next_zoom = (s.timeline_zoom * factor).clamp(0.35, 4.0);
-                if (next_zoom - 1.0).abs() < 0.04 {
+                if (next_zoom - 1.0).abs() < 0.03 {
                     next_zoom = 1.0;
                 }
                 let lane_w = lane_w_logical(&w);
@@ -1993,38 +2040,57 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
-        win.on_click_diamond(move |kf_idx, track_idx, shift| {
+        win.on_click_diamond(move |kf_idx, track_idx, shift, ctrl| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
                 s.note_interaction();
                 s.playing = false;
                 s.drag_kf_undo_pending = true;
-                let visible_bones: &[usize] = if s.show_all_bones {
-                    &DISPLAY_BONE_ORDER
-                } else {
-                    &[8, 3, 4, 5]
-                };
                 let prev_time = s.current_time;
                 let prev_bone = s.active_bone_idx;
-                let bone_idx = visible_bones
+                let bone_idx = s
+                    .visible_timeline_bones()
                     .get(track_idx.max(0) as usize)
                     .copied()
                     .unwrap_or(s.active_bone_idx);
                 s.active_bone_idx = bone_idx;
-                if let Some(kf) = s.active_clip().keyframes.get(kf_idx as usize) {
-                    let kf_time = kf.time;
-                    if shift {
-                        let anchor = if s.selected_range_bone == Some(bone_idx) {
-                            s.selected_range_times.map(|(a, _)| a).unwrap_or(prev_time)
-                        } else if prev_bone == bone_idx {
-                            prev_time
-                        } else {
-                            kf_time
-                        };
-                        s.selected_range_bone = Some(bone_idx);
-                        s.selected_range_times = Some((anchor, kf_time));
+                if let Some(kf_time) = s.active_clip().keyframes.get(kf_idx as usize).map(|k| k.time) {
+                    let kf_frame = s.frame_idx_for_time(kf_time);
+                    if ctrl {
+                        let key = (kf_frame, bone_idx);
+                        if !s.selected_keys.remove(&key) {
+                            s.selected_keys.insert(key);
+                            s.selection_anchor = Some(key);
+                        }
+                        s.drag_group_origin_frame = None;
+                        s.drag_group_moved = false;
+                        s.sync_range_from_selected_keys();
+                    } else if shift {
+                        let anchor = s
+                            .selection_anchor
+                            .unwrap_or((s.frame_idx_for_time(prev_time), prev_bone));
+                        s.select_rect_range(anchor, (kf_frame, bone_idx), false);
+                        s.drag_group_origin_frame = None;
+                        s.drag_group_moved = false;
+                    } else if s.selected_keys.len() > 1 && s.selected_keys.contains(&(kf_frame, bone_idx)) {
+                        // Preserve multi-selection while dragging any selected diamond in the group.
+                        s.drag_group_origin_frame = Some(kf_frame);
+                        s.drag_group_moved = false;
                     } else {
-                        s.clear_bone_selection();
+                        s.selected_keys.clear();
+                        if s.timeline_bone_scope {
+                            s.selected_keys.insert((kf_frame, bone_idx));
+                        } else if let Some(mask) = s.active_clip().keyframes.get(kf_idx as usize).map(|kf| kf.bone_mask) {
+                            for &bi in s.visible_timeline_bones() {
+                                if (mask & (1u16 << bi)) != 0 {
+                                    s.selected_keys.insert((kf_frame, bi));
+                                }
+                            }
+                        }
+                        s.selection_anchor = Some((kf_frame, bone_idx));
+                        s.drag_group_origin_frame = Some(kf_frame);
+                        s.drag_group_moved = false;
+                        s.sync_range_from_selected_keys();
                     }
                     s.current_time = kf_time;
                 }
@@ -2043,51 +2109,137 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
+        win.on_end_drag_diamond(move |kf_idx, track_idx| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                if !s.drag_group_moved && s.selected_keys.len() > 1 {
+                    let bone_idx = s
+                        .visible_timeline_bones()
+                        .get(track_idx.max(0) as usize)
+                        .copied()
+                        .unwrap_or(s.active_bone_idx);
+                    if let Some(kf_time) = s.active_clip().keyframes.get(kf_idx as usize).map(|k| k.time) {
+                        let kf_frame = s.frame_idx_for_time(kf_time);
+                        s.selected_keys.clear();
+                        if s.timeline_bone_scope {
+                            s.selected_keys.insert((kf_frame, bone_idx));
+                        } else if let Some(mask) = s.active_clip().keyframes.get(kf_idx as usize).map(|kf| kf.bone_mask) {
+                            for &bi in s.visible_timeline_bones() {
+                                if (mask & (1u16 << bi)) != 0 {
+                                    s.selected_keys.insert((kf_frame, bi));
+                                }
+                            }
+                        }
+                        s.selection_anchor = Some((kf_frame, bone_idx));
+                        s.sync_range_from_selected_keys();
+                        s.dirty.timeline_meta = true;
+                        s.dirty.timeline_diamonds = true;
+                        sync_dirty_ui(&mut s, &w);
+                    }
+                }
+                s.drag_group_origin_frame = None;
+                s.drag_group_moved = false;
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_box_select_keyframes(move |f0, f1, y0, y1, additive, _commit| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.note_interaction();
+                s.playing = false;
+                let lane_w = lane_w_logical(&w);
+                let vis_f = s.timeline_visible_frames(lane_w);
+                let min_frame = s.timeline_scroll_frame + f0.clamp(0.0, 1.0) * vis_f;
+                let max_frame = s.timeline_scroll_frame + f1.clamp(0.0, 1.0) * vis_f;
+                let min_track = ((y0 - 2.0) / 24.0).floor() as i32;
+                let max_track = ((y1 - 2.0) / 24.0).floor() as i32;
+                s.select_keyframes_in_box(min_frame, max_frame, min_track, max_track, additive);
+                sync_dirty_ui(&mut s, &w);
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_select_all_keyframes_action(move || {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                let n = s.select_all_visible_keyframes();
+                sync_dirty_ui(&mut s, &w);
+                show_toast(&mut s, &w, format!("{n} keyframes seleccionados"));
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_clear_keyframe_selection_action(move || {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                if !s.selected_keys.is_empty() || s.selected_range_times.is_some() {
+                    s.clear_bone_selection();
+                    s.dirty.timeline_meta = true;
+                    s.dirty.timeline_tracks = true;
+                    s.dirty.timeline_diamonds = true;
+                    sync_dirty_ui(&mut s, &w);
+                }
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_duplicate_selected_keyframes_action(move || {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                let n = s.duplicate_selected_keyframes();
+                sync_dirty_ui(&mut s, &w);
+                if n > 0 {
+                    show_toast(&mut s, &w, format!("{n} keyframe(s) duplicados"));
+                    w.window().request_redraw();
+                }
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
         win.on_drag_diamond(move |kf_idx, new_frac| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
                 s.note_interaction();
-                let ki = kf_idx as usize;
                 let n = s.active_clip().keyframes.len();
-                if ki >= n || n < 2 {
+                if n < 2 {
                     return;
                 }
-                if s.drag_kf_undo_pending {
-                    s.push_undo();
-                    s.drag_kf_undo_pending = false;
-                }
                 s.playing = false;
-                let dur = s.active_clip().duration.max(0.05);
-                let fps = s.timeline_fps.max(1) as f32;
                 let frames = s.active_total_frames() as f32;
                 let lane_w = lane_w_logical(&w);
                 let vis_f = s.timeline_visible_frames(lane_w);
                 let frame_pos = s.timeline_scroll_frame + new_frac.clamp(0.0, 1.0) * vis_f;
-                let f_idx = frame_pos.round().clamp(0.0, frames);
-                let frame_step = dur / frames.max(1.0);
-                let min_t = if ki == 0 { 0.0 } else { s.active_clip().keyframes[ki - 1].time + frame_step * 0.5 };
-                let max_t = if ki + 1 == n { dur } else { s.active_clip().keyframes[ki + 1].time - frame_step * 0.5 };
-                let snapped = (f_idx / frames.max(1.0)) * dur;
-                let final_t = crate::model::snap_time_to_fps(
-                    snapped.clamp(min_t.min(max_t), max_t.max(min_t)),
-                    dur,
-                    fps,
-                );
-                let old_t = s.active_clip().keyframes[ki].time;
-                let clip = s.active_clip_mut();
-                clip.keyframes[ki].time = final_t;
-                if let Some(imp) = clip.impact_time {
-                    if (imp - old_t).abs() < 0.02 {
-                        clip.impact_time = Some(final_t);
-                    }
+                let target_f = frame_pos.round().clamp(0.0, frames) as i32;
+                let origin_f = s.drag_group_origin_frame.unwrap_or_else(|| {
+                    s.active_clip()
+                        .keyframes
+                        .get(kf_idx as usize)
+                        .map(|k| s.frame_idx_for_time(k.time))
+                        .unwrap_or(target_f)
+                });
+                let delta = target_f - origin_f;
+                if delta == 0 {
+                    return;
                 }
-                s.current_time = final_t;
-                s.dirty.main_viewport = true;
-                s.dirty.transform_readout = true;
-                s.dirty.timeline_meta = true;
-                s.dirty.timeline_diamonds = true;
-                sync_dirty_ui(&mut s, &w);
-                request_immediate_redraw(&w);
+                let push_undo = s.drag_kf_undo_pending;
+                let moved = s.move_selected_keys_by_frames(delta, push_undo);
+                if moved > 0 {
+                    s.drag_kf_undo_pending = false;
+                    s.drag_group_moved = true;
+                    sync_dirty_ui(&mut s, &w);
+                    request_immediate_redraw(&w);
+                }
             }
         });
     }
@@ -2240,6 +2392,15 @@ pub fn wire_ui_and_gpu(
         win.on_delete_keyframe_action(move || {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
+                if !s.effective_selected_keys().is_empty() {
+                    let removed = s.delete_selected_keyframes();
+                    if removed > 0 {
+                        sync_dirty_ui(&mut s, &w);
+                        show_toast(&mut s, &w, format!("{removed} keyframe(s) borrados"));
+                        w.window().request_redraw();
+                    }
+                    return;
+                }
                 if s.timeline_bone_scope {
                     let b_idx = s.active_bone_idx.min(BONE_COUNT - 1);
                     let removed = s.delete_bone_frames(b_idx, false);
@@ -2303,7 +2464,7 @@ pub fn wire_ui_and_gpu(
                     s.dirty.timeline_meta = true;
                     s.dirty.timeline_diamonds = true;
                     sync_dirty_ui(&mut s, &w);
-                    show_toast(&mut s, &w, "Frame completo (8h) borrado".into());
+                    show_toast(&mut s, &w, "Frame completo (10h) borrado".into());
                     w.window().request_redraw();
                 }
             }
@@ -2401,9 +2562,21 @@ pub fn wire_ui_and_gpu(
         });
     }
     {
+        let st = state.clone();
         let w_weak = win.as_weak();
         win.on_copy_timeline_action(move || {
             if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                if !s.effective_selected_keys().is_empty() {
+                    let count = s.copy_selected_keyframes();
+                    if count > 0 {
+                        s.dirty.timeline_meta = true;
+                        sync_dirty_ui(&mut s, &w);
+                        show_toast(&mut s, &w, format!("{count} keyframe(s) copiados"));
+                        return;
+                    }
+                }
+                drop(s);
                 if w.get_timeline_bone_scope() {
                     w.invoke_copy_bone_action(false);
                 } else {
@@ -2413,10 +2586,15 @@ pub fn wire_ui_and_gpu(
         });
     }
     {
+        let st = state.clone();
         let w_weak = win.as_weak();
         win.on_paste_timeline_action(move || {
             if let Some(w) = w_weak.upgrade() {
-                if w.get_timeline_bone_scope() {
+                let multi = {
+                    let s = st.borrow();
+                    s.clipboard_bone.as_ref().map_or(false, |cb| cb.multi_bone)
+                };
+                if multi || w.get_timeline_bone_scope() {
                     w.invoke_paste_bone_action(false);
                 } else {
                     w.invoke_paste_pose_action();
@@ -2462,6 +2640,8 @@ pub fn wire_ui_and_gpu(
                     1 => tr.rot[ax] = (tr.rot[ax] + delta * 3.0).clamp(-720.0, 720.0),
                     _ => tr.scale[ax] = (tr.scale[ax] + delta * 0.05).clamp(0.10, 4.0),
                 }
+                s.sync_crouch_knees_if_enabled(ki, b_idx);
+                s.clamp_edited_bone_above_floor(ki, b_idx);
                 s.note_interaction();
                 s.mark_active_clip_modified();
                 s.dirty.main_viewport = true;
@@ -2481,7 +2661,8 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
-        win.on_scrub_bone_axis(move |chan, axis, px_dx| {
+        let rq = redraw_queued.clone();
+        win.on_scrub_bone_axis(move |chan, axis, px_dx, shift, ctrl| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
                 s.note_interaction();
@@ -2490,15 +2671,76 @@ pub fn wire_ui_and_gpu(
                 let b_idx = s.active_bone_idx.min(BONE_COUNT - 1);
                 let tr = s.active_clip_mut().keyframes[ki].bones.bone_mut(b_idx);
                 let ax = axis.clamp(0, 2) as usize;
+                let mul = if shift { 0.22 } else { 1.0 };
                 match chan {
-                    0 => tr.pos[ax] = (tr.pos[ax] + px_dx * 0.06).clamp(-64.0, 64.0),
-                    1 => tr.rot[ax] = (tr.rot[ax] + px_dx * 0.75).clamp(-720.0, 720.0),
-                    _ => tr.scale[ax] = (tr.scale[ax] + px_dx * 0.01).clamp(0.10, 4.0),
+                    0 => {
+                        let mut v = (tr.pos[ax] + px_dx * 0.04 * mul).clamp(-64.0, 64.0);
+                        if ctrl { v = (v * 2.0).round() * 0.5; }
+                        tr.pos[ax] = v;
+                    }
+                    1 => {
+                        let mut v = (tr.rot[ax] + px_dx * 0.45 * mul).clamp(-720.0, 720.0);
+                        if ctrl { v = (v / 5.0).round() * 5.0; }
+                        tr.rot[ax] = v;
+                    }
+                    _ => {
+                        let mut v = (tr.scale[ax] + px_dx * 0.006 * mul).clamp(0.10, 4.0);
+                        if ctrl { v = (v * 20.0).round() / 20.0; }
+                        tr.scale[ax] = v;
+                    }
                 }
+                s.sync_crouch_knees_if_enabled(ki, b_idx);
+                s.clamp_edited_bone_above_floor(ki, b_idx);
                 s.dirty.main_viewport = true;
                 s.dirty.transform_readout = true;
                 sync_dirty_ui(&mut s, &w);
-                request_immediate_redraw(&w);
+                request_coalesced_redraw(&w, &rq);
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        let rq = redraw_queued.clone();
+        win.on_wheel_bone_axis(move |chan, axis, dy_px, shift, ctrl| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                if !s.drag.undo_pushed {
+                    s.push_undo();
+                }
+                s.note_interaction();
+                s.playing = false;
+                let ki = s.editable_kf_index();
+                let b_idx = s.active_bone_idx.min(BONE_COUNT - 1);
+                let tr = s.active_clip_mut().keyframes[ki].bones.bone_mut(b_idx);
+                let ax = axis.clamp(0, 2) as usize;
+                let steps = (dy_px / 60.0).clamp(-3.0, 3.0);
+                let mul = if shift { 0.25 } else { 1.0 };
+                match chan {
+                    0 => {
+                        let mut v = (tr.pos[ax] + steps * 0.25 * mul).clamp(-64.0, 64.0);
+                        if ctrl { v = v.round(); }
+                        tr.pos[ax] = v;
+                    }
+                    1 => {
+                        let mut v = (tr.rot[ax] + steps * 2.5 * mul).clamp(-720.0, 720.0);
+                        if ctrl { v = (v / 15.0).round() * 15.0; }
+                        tr.rot[ax] = v;
+                    }
+                    _ => {
+                        let mut v = (tr.scale[ax] + steps * 0.04 * mul).clamp(0.10, 4.0);
+                        if ctrl { v = (v * 10.0).round() / 10.0; }
+                        tr.scale[ax] = v;
+                    }
+                }
+                s.sync_crouch_knees_if_enabled(ki, b_idx);
+                s.clamp_edited_bone_above_floor(ki, b_idx);
+                s.mark_active_clip_modified();
+                s.dirty.main_viewport = true;
+                s.dirty.transform_readout = true;
+                s.dirty.timeline_diamonds = true;
+                sync_dirty_ui(&mut s, &w);
+                request_coalesced_redraw(&w, &rq);
             }
         });
     }
@@ -2519,6 +2761,8 @@ pub fn wire_ui_and_gpu(
                     1 => tr.rot[ax] = 0.0,
                     _ => tr.scale[ax] = 1.0,
                 }
+                s.sync_crouch_knees_if_enabled(ki, b_idx);
+                s.clamp_edited_bone_above_floor(ki, b_idx);
                 s.mark_active_clip_modified();
                 s.dirty.main_viewport = true;
                 s.dirty.transform_readout = true;
@@ -2559,41 +2803,6 @@ pub fn wire_ui_and_gpu(
         });
     }
     {
-        let rescale_clip = |s: &mut AppState, next_d: f32| {
-            let next_d = next_d.clamp(0.10, 3.0);
-            s.push_undo();
-            let old_d = s.active_clip().duration.max(0.05);
-            let ratio = next_d / old_d;
-            let clip = s.active_clip_mut();
-            clip.duration = next_d;
-            for k in &mut clip.keyframes {
-                k.time = (k.time * ratio).clamp(0.0, next_d);
-            }
-            if let Some(imp) = clip.impact_time {
-                clip.impact_time = Some((imp * ratio).clamp(0.0, next_d));
-            }
-            crate::model::snap_clip_to_frame_grid(clip);
-            s.current_time = crate::model::snap_time_to_frame((s.current_time * ratio).clamp(0.0, next_d), next_d);
-            s.clear_bone_selection();
-            s.mark_active_clip_modified();
-            s.dirty.main_viewport = true;
-            s.dirty.inspector = true;
-            s.dirty.timeline_meta = true;
-            s.dirty.timeline_tracks = true;
-            s.dirty.timeline_diamonds = true;
-        };
-
-        let st = state.clone();
-        let w_weak = win.as_weak();
-        win.on_change_duration(move |d| {
-            if let Some(w) = w_weak.upgrade() {
-                let mut s = st.borrow_mut();
-                rescale_clip(&mut s, d);
-                sync_dirty_ui(&mut s, &w);
-                w.window().request_redraw();
-            }
-        });
-
         let st2 = state.clone();
         let w_weak2 = win.as_weak();
         win.on_set_clip_frames(move |target_frames| {
@@ -2698,12 +2907,11 @@ pub fn wire_ui_and_gpu(
         win.on_set_easing(move |ei| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
-                s.push_undo();
-                let ki = s.ensure_kf_at_current();
-                s.active_clip_mut().keyframes[ki].easing = EasingMode::from_index(ei);
-                s.dirty.main_viewport = true;
-                s.dirty.inspector = true;
+                let n = s.set_easing_for_selection(EasingMode::from_index(ei));
                 sync_dirty_ui(&mut s, &w);
+                if n > 1 {
+                    show_toast(&mut s, &w, format!("Curva aplicada a {n} frames"));
+                }
             }
         });
     }
@@ -2752,6 +2960,27 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
+        win.on_toggle_crouch_knees(move |v| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.auto_crouch_knees = v;
+                if v {
+                    let ki = s.editable_kf_index();
+                    let b_idx = s.active_bone_idx;
+                    if b_idx == 0 || b_idx == 1 {
+                        s.sync_crouch_knees_if_enabled(ki, b_idx);
+                    }
+                }
+                s.dirty.main_viewport = true;
+                s.dirty.inspector = true;
+                sync_dirty_ui(&mut s, &w);
+                w.window().request_redraw();
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
         win.on_set_bg_mode(move |bi| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
@@ -2775,6 +3004,7 @@ pub fn wire_ui_and_gpu(
                     let cur = s.active_clip().clone();
                     s.redo_stack.push(cur);
                     *s.active_clip_mut() = prev;
+                    s.clear_bone_selection();
                     s.dirty.main_viewport = true;
                     s.dirty.inspector = true;
                     s.dirty.timeline_meta = true;
@@ -2795,6 +3025,7 @@ pub fn wire_ui_and_gpu(
                     let cur = s.active_clip().clone();
                     s.undo_stack.push(cur);
                     *s.active_clip_mut() = next;
+                    s.clear_bone_selection();
                     s.dirty.main_viewport = true;
                     s.dirty.inspector = true;
                     s.dirty.timeline_meta = true;
@@ -2919,6 +3150,7 @@ pub fn wire_ui_and_gpu(
                 let mut s = st.borrow_mut();
                 if let Some(pos) = s.project.clips.iter().position(|c| c.id == cid.as_str()) {
                     s.active_clip_idx = pos;
+                    s.crouch_legs_driven = false;
                     s.current_time = 0.0;
                     s.playing = false;
                     s.timeline_zoom = 1.0;
@@ -2960,6 +3192,7 @@ pub fn wire_ui_and_gpu(
                     copy.bc_targets.clear();
                     s.project.clips.push(copy);
                     s.active_clip_idx = s.project.clips.len() - 1;
+                    s.crouch_legs_driven = false;
                     s.current_time = 0.0;
                     s.timeline_zoom = 1.0;
                     s.timeline_scroll_frame = 0.0;
@@ -2992,6 +3225,7 @@ pub fn wire_ui_and_gpu(
                 let cname = clip.name.clone();
                 s.project.clips.push(clip);
                 s.active_clip_idx = s.project.clips.len() - 1;
+                s.crouch_legs_driven = false;
                 s.current_time = 0.0;
                 s.playing = false;
                 s.timeline_zoom = 1.0;
@@ -3100,6 +3334,9 @@ pub fn wire_ui_and_gpu(
                 "r" => w.invoke_reset_camera(),
                 "z" if ctrl && !shift => w.invoke_undo_action(),
                 "y" | "z" if ctrl => w.invoke_redo_action(),
+                "esc" => w.invoke_clear_keyframe_selection_action(),
+                "a" if ctrl => w.invoke_select_all_keyframes_action(),
+                "d" if ctrl => w.invoke_duplicate_selected_keyframes_action(),
                 "c" if ctrl && shift => w.invoke_copy_pose_action(),
                 "v" if ctrl && shift => w.invoke_paste_pose_action(),
                 "c" if ctrl => w.invoke_copy_timeline_action(),
@@ -3110,12 +3347,12 @@ pub fn wire_ui_and_gpu(
                 "4" => { w.set_active_tool(3); w.invoke_select_tool(3); }
                 "5" | "g" => { w.set_active_tool(4); w.invoke_select_tool(4); }
                 "l" => w.invoke_toggle_gizmo_space(),
-                "w" => { st.borrow_mut().held_nav_keys[0] = true; w.window().request_redraw(); }
-                "s" => { st.borrow_mut().held_nav_keys[1] = true; w.window().request_redraw(); }
-                "a" => { st.borrow_mut().held_nav_keys[2] = true; w.window().request_redraw(); }
-                "d" => { st.borrow_mut().held_nav_keys[3] = true; w.window().request_redraw(); }
-                "e" => { st.borrow_mut().held_nav_keys[4] = true; w.window().request_redraw(); }
-                "q" => { st.borrow_mut().held_nav_keys[5] = true; w.window().request_redraw(); }
+                "w" if !ctrl && !alt => { st.borrow_mut().held_nav_keys[0] = true; w.window().request_redraw(); }
+                "s" if !ctrl && !alt => { st.borrow_mut().held_nav_keys[1] = true; w.window().request_redraw(); }
+                "a" if !ctrl && !alt => { st.borrow_mut().held_nav_keys[2] = true; w.window().request_redraw(); }
+                "d" if !ctrl && !alt => { st.borrow_mut().held_nav_keys[3] = true; w.window().request_redraw(); }
+                "e" if !ctrl && !alt => { st.borrow_mut().held_nav_keys[4] = true; w.window().request_redraw(); }
+                "q" if !ctrl && !alt => { st.borrow_mut().held_nav_keys[5] = true; w.window().request_redraw(); }
                 "=" | "+" => { st.borrow_mut().held_nav_keys[6] = true; w.window().request_redraw(); }
                 "-" | "_" => { st.borrow_mut().held_nav_keys[7] = true; w.window().request_redraw(); }
                 _ => {}
@@ -3167,54 +3404,6 @@ pub fn wire_ui_and_gpu(
                 s.flush_profile_if_dirty(true);
                 sync_dirty_ui(&mut s, &w);
                 show_toast(&mut s, &w, format!("Arma marcada como {}", status.label()));
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        let w_weak = win.as_weak();
-        win.on_export_curated_weapons_action(move || {
-            if let Some(w) = w_weak.upgrade() {
-                let mut s = st.borrow_mut();
-                s.flush_profile_if_dirty(true);
-                let Some(ref sr) = s.servernuevo_root else {
-                    show_toast(&mut s, &w, "Sin ruta local servernuevo".into());
-                    return;
-                };
-                match export_curated_weapons_final(&s.weapons, sr) {
-                    Ok((_, cnt)) => {
-                        show_toast(
-                            &mut s,
-                            &w,
-                            format!("curated_weapons_final.json guardado ({cnt} armas aprobadas)"),
-                        );
-                    }
-                    Err(e) => show_toast(&mut s, &w, e),
-                }
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        let w_weak = win.as_weak();
-        win.on_filter_gallery_source(move |sf| {
-            if let Some(w) = w_weak.upgrade() {
-                let mut s = st.borrow_mut();
-                s.gallery_source_filter = sf;
-                s.dirty.gallery = true;
-                sync_dirty_ui(&mut s, &w);
-            }
-        });
-    }
-    {
-        let st = state.clone();
-        let w_weak = win.as_weak();
-        win.on_filter_gallery_status(move |sf| {
-            if let Some(w) = w_weak.upgrade() {
-                let mut s = st.borrow_mut();
-                s.gallery_status_filter = sf;
-                s.dirty.gallery = true;
-                sync_dirty_ui(&mut s, &w);
             }
         });
     }
@@ -3668,7 +3857,6 @@ pub fn wire_ui_and_gpu(
                     "cam:reset" => {
                         s.main_cam.reset_main_smooth();
                         s.dirty.main_viewport = true;
-                        s.dirty.triad = true;
                         sync_dirty_ui(&mut s, &w);
                         w.window().request_redraw();
                     }
@@ -3701,6 +3889,7 @@ pub fn wire_ui_and_gpu(
                         let cid = &id[5..];
                         if let Some(pos) = s.project.clips.iter().position(|c| c.id == cid) {
                             s.active_clip_idx = pos;
+                            s.crouch_legs_driven = false;
                             s.current_time = 0.0;
                             s.playing = false;
                             s.timeline_zoom = 1.0;
@@ -3909,7 +4098,6 @@ pub fn wire_ui_and_gpu(
         });
     }
 
-    let _ = BONE_NAMES;
     StudioTimers {
         _toast: toast_timer,
         _save: save_timer,

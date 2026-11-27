@@ -107,6 +107,7 @@ fn run_headless_smoke(out_png: Option<&Path>) -> Result<(), String> {
                 show_onion: false,
                 show_trail: true,
                 show_gizmo: true,
+                tool_mode: crate::model::ToolMode::Rotate,
                 gizmo_world_space: true,
                 show_offhand_weapon: false,
                 bg_mode: 1.0,
@@ -517,21 +518,85 @@ mod tests {
         let _idx_auto = s.editable_kf_index();
         assert_eq!(s.active_clip().keyframes.len(), orig_len + 1);
 
-        let (pivot, axes, parent_axes, bone_axes, vp) = s.active_gizmo_geom();
+        let (pivot, axes, parent_axes, _, vp, inv_vp, eye) = s.active_gizmo_geom();
         let (cam_r, cam_u, cam_f) = camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
+        let g_scale = math3d::gizmo_world_scale(eye, pivot);
         let center_px = math3d::project_to_screen(vp, pivot, 900.0, 520.0).unwrap();
-        let pick_c = pick_gizmo_handle(center_px.0, center_px.1, vp, 900.0, 520.0, pivot, axes, cam_r, 0.42, 0.425);
+        let pick_c = pick_gizmo_handle(
+            ToolMode::Rotate,
+            center_px.0,
+            center_px.1,
+            vp,
+            inv_vp,
+            900.0,
+            520.0,
+            pivot,
+            axes,
+            cam_r,
+            eye,
+        );
         assert_eq!(pick_c, GizmoAxis::Free);
 
-        let y_tip = math3d::project_to_screen(vp, pivot.add(axes[1].mul(0.35)), 900.0, 520.0).unwrap();
-        let pick_y = pick_gizmo_handle(y_tip.0, y_tip.1, vp, 900.0, 520.0, pivot, axes, cam_r, 0.42, 0.425);
+        // On Move tool, point along Y arrow hits GizmoAxis::Y
+        let y_tip = math3d::project_to_screen(vp, pivot.add(axes[1].mul(g_scale * 0.72)), 900.0, 520.0).unwrap();
+        let pick_y = pick_gizmo_handle(
+            ToolMode::Move,
+            y_tip.0,
+            y_tip.1,
+            vp,
+            inv_vp,
+            900.0,
+            520.0,
+            pivot,
+            axes,
+            cam_r,
+            eye,
+        );
         assert_eq!(pick_y, GizmoAxis::Y);
 
         let mut bt = BoneTransform::default();
-        apply_gizmo_drag(&mut bt, ToolMode::Rotate, GizmoAxis::Y, axes, parent_axes, bone_axes, cam_r, cam_u, cam_f, vp, 900.0, 520.0, pivot, 400.0, 260.0, 440.0, 260.0);
+        apply_gizmo_drag(
+            &mut bt,
+            ToolMode::Rotate,
+            GizmoAxis::Y,
+            axes,
+            parent_axes,
+            cam_r,
+            cam_u,
+            cam_f,
+            vp,
+            inv_vp,
+            eye,
+            900.0,
+            520.0,
+            pivot,
+            400.0,
+            260.0,
+            440.0,
+            260.0,
+        );
         assert!(bt.rot[1].abs() > 1.0 && bt.rot[0] == 0.0 && bt.rot[2] == 0.0);
 
-        apply_gizmo_drag(&mut bt, ToolMode::Move, GizmoAxis::Free, axes, parent_axes, bone_axes, cam_r, cam_u, cam_f, vp, 900.0, 520.0, pivot, 400.0, 260.0, 420.0, 240.0);
+        apply_gizmo_drag(
+            &mut bt,
+            ToolMode::Move,
+            GizmoAxis::Free,
+            axes,
+            parent_axes,
+            cam_r,
+            cam_u,
+            cam_f,
+            vp,
+            inv_vp,
+            eye,
+            900.0,
+            520.0,
+            pivot,
+            400.0,
+            260.0,
+            420.0,
+            240.0,
+        );
         assert!(bt.pos.iter().any(|v| v.abs() > 0.01));
 
         let before = s.main_cam.current.target;
@@ -542,7 +607,7 @@ mod tests {
 
         s.active_bone_idx = 3; // BrazoDerecho
         let arm_px = {
-            let (pivot, _, _, _, vp) = s.active_gizmo_geom();
+            let (pivot, _, _, _, vp, _, _) = s.active_gizmo_geom();
             math3d::project_to_screen(vp, pivot, 900.0, 520.0).unwrap()
         };
         let orig_tgt = s.main_cam.target_pos;
@@ -958,11 +1023,12 @@ mod tests {
             crate::math3d::GizmoAxis::Free,
             id_axes,
             id_axes,
-            id_axes,
             crate::math3d::Vec3::new(1.0, 0.0, 0.0),
             crate::math3d::Vec3::new(0.0, 1.0, 0.0),
             crate::math3d::Vec3::new(0.0, 0.0, -1.0),
             crate::math3d::Mat4::IDENTITY,
+            crate::math3d::Mat4::IDENTITY,
+            crate::math3d::Vec3::new(0.0, 0.0, 3.0),
             1000.0,
             700.0,
             crate::math3d::Vec3::ZERO,
@@ -1156,5 +1222,348 @@ mod tests {
             shield.blade_tip_mc[2] < shield.blade_base_mc[2],
             "Shield blade bounds must stay ordered cleanly"
         );
+    }
+
+    #[test]
+    fn multi_keyframe_box_select_move_duplicate_copy_paste_easing_and_delete_work() {
+        let mut s = AppState::new(std::env::temp_dir());
+        let mut clip = create_blank_clip(77);
+        clip.duration = 0.80;
+        s.project.clips.push(clip);
+        s.active_clip_idx = s.project.clips.len() - 1;
+        s.timeline_fps = 20;
+        s.show_all_bones = false; // tracks: [0->root(8), 1->right_arm(3), 2->left_arm(4), 3->right_item(5)]
+
+        // Populate interior frames 4 (0.20s), 8 (0.40s), 12 (0.60s) on multiple bones
+        for (fi, deg) in [(4, 30.0), (8, 60.0), (12, 90.0)] {
+            let t = s.time_for_frame_idx(fi);
+            for b in [8usize, 3usize, 4usize, 5usize] {
+                let ki = s.ensure_bone_kf_at(t, b, crate::model::EasingMode::Linear);
+                s.active_clip_mut().keyframes[ki].bones.0[b].rot[0] = deg + b as f32;
+                s.active_clip_mut().keyframes[ki].set_bone(b, true);
+            }
+        }
+
+        // 1. Box-select across frames 4..=8 and tracks 1..=2 (right_arm=3 & left_arm=4 ONLY)
+        let n_sel = s.select_keyframes_in_box(4.0, 8.0, 1, 2, false);
+        assert_eq!(n_sel, 4, "Should select (4,3),(8,3),(4,4),(8,4)");
+        assert!(s.selected_keys.contains(&(4, 3)) && s.selected_keys.contains(&(8, 4)));
+        assert!(!s.selected_keys.contains(&(4, 5)) && !s.selected_keys.contains(&(4, 8)));
+
+        // 2. Move selection +2 frames -> frames 6..=10, leaving right_item (5) & root (8) untouched at 4 and 8
+        let moved = s.move_selected_keys_by_frames(2, true);
+        assert_eq!(moved, 4);
+        assert!(s.selected_keys.contains(&(6, 3)) && s.selected_keys.contains(&(10, 4)));
+        let p_6 = sample_clip_pose(s.active_clip(), s.time_for_frame_idx(6));
+        assert!((p_6.bone(3).rot[0] - 33.0).abs() < 0.2);
+        let kf_at_4 = s
+            .active_clip()
+            .keyframes
+            .iter()
+            .find(|k| s.frame_idx_for_time(k.time) == 4)
+            .expect("Frame 4 still holds root & right_item");
+        assert!(kf_at_4.has_bone(5) && !kf_at_4.has_bone(3), "right_item untouched at frame 4");
+
+        // 3. Collision guard: moving +2 again hits unselected frame 12 -> must refuse cleanly
+        assert_eq!(s.move_selected_keys_by_frames(2, true), 0);
+
+        // 4. Batch copy & multi-bone paste at playhead 0.05s (frame 1)
+        let copied = s.copy_selected_keyframes();
+        assert_eq!(copied, 4);
+        assert!(s.clipboard_bone.as_ref().unwrap().multi_bone);
+        s.current_time = s.time_for_frame_idx(1);
+        let pasted = s.paste_bone_frames(8, false);
+        assert_eq!(pasted, 4);
+        assert!(s.selected_keys.contains(&(1, 3)) && s.selected_keys.contains(&(1, 4)));
+
+        // 5. Batch easing
+        let eased = s.set_easing_for_selection(crate::model::EasingMode::Step);
+        assert!(eased >= 2);
+        let kf1 = s
+            .active_clip()
+            .keyframes
+            .iter()
+            .find(|k| s.frame_idx_for_time(k.time) == 1)
+            .unwrap();
+        assert_eq!(kf1.easing, crate::model::EasingMode::Step);
+
+        // 6. Batch duplicate immediately after selection
+        let duped = s.duplicate_selected_keyframes();
+        assert_eq!(duped, 4);
+        assert_eq!(s.selected_keys.len(), 4);
+
+        // 7. Batch delete removes only selected keys & undo restores them cleanly
+        let deleted = s.delete_selected_keyframes();
+        assert_eq!(deleted, 4);
+        assert!(s.selected_keys.is_empty());
+        let prev = s.undo_stack.pop().unwrap();
+        *s.active_clip_mut() = prev;
+        assert!(s.active_clip().keyframes.iter().any(|k| k.has_bone(3)));
+    }
+
+    #[test]
+    fn gizmo_rotate_matrix_ring_pick_and_move_planes_work_from_any_perspective() {
+        let cam = renderer3d::CameraState {
+            yaw: 0.72,
+            pitch: 0.45,
+            dist: 2.8,
+            target: [0.0, 1.0, 0.0],
+        };
+        let (vp, inv_vp, eye) = cam.vp_and_inv(16.0 / 10.0);
+        let (cam_r, cam_u, cam_f) = math3d::camera_basis(cam.yaw, cam.pitch);
+        let pivot = math3d::Vec3::new(0.0, 1.2, 0.0);
+        let g_scale = math3d::gizmo_world_scale(eye, pivot);
+        let world_axes = [
+            math3d::Vec3::new(1.0, 0.0, 0.0),
+            math3d::Vec3::new(0.0, 1.0, 0.0),
+            math3d::Vec3::new(0.0, 0.0, 1.0),
+        ];
+
+        // 1. Rotate ring picking on front-hemisphere arcs (Green Y ring, Red X ring, Blue Z ring, outer Roll ring)
+        let y_ring_pt = pivot.add(eye.sub(pivot).cross(world_axes[1]).norm().mul(g_scale));
+        let y_px = math3d::project_to_screen(vp, y_ring_pt, 1280.0, 800.0).unwrap();
+        assert_eq!(
+            math3d::pick_gizmo_handle(ToolMode::Rotate, y_px.0, y_px.1, vp, inv_vp, 1280.0, 800.0, pivot, world_axes, cam_r, eye),
+            GizmoAxis::Y
+        );
+
+        let x_ring_pt = pivot.add(math3d::Vec3::new(0.0, 0.707 * g_scale, 0.707 * g_scale));
+        let x_px = math3d::project_to_screen(vp, x_ring_pt, 1280.0, 800.0).unwrap();
+        assert_eq!(
+            math3d::pick_gizmo_handle(ToolMode::Rotate, x_px.0, x_px.1, vp, inv_vp, 1280.0, 800.0, pivot, world_axes, cam_r, eye),
+            GizmoAxis::X
+        );
+
+        let roll_pt = pivot.add(cam_r.mul(g_scale * 1.18));
+        let roll_px = math3d::project_to_screen(vp, roll_pt, 1280.0, 800.0).unwrap();
+        assert_eq!(
+            math3d::pick_gizmo_handle(ToolMode::Rotate, roll_px.0, roll_px.1, vp, inv_vp, 1280.0, 800.0, pivot, world_axes, cam_r, eye),
+            GizmoAxis::Roll
+        );
+
+        // 2. Matrix-composed World Y rotation on an ALREADY-twisted bone must rotate purely around [0, 1, 0]!
+        let mut tr = BoneTransform::IDENTITY;
+        tr.rot = [45.0, 60.0, -30.0];
+        let r_old = math3d::Mat4::rot_zyx_deg(tr.rot[0], tr.rot[1], tr.rot[2]);
+        let p0 = pivot.add(math3d::Vec3::new(g_scale, 0.0, 0.0));
+        let p1 = pivot.add(math3d::Vec3::new(0.866 * g_scale, 0.0, -0.5 * g_scale)); // +30 deg around +Y
+        let s0 = math3d::project_to_screen(vp, p0, 1280.0, 800.0).unwrap();
+        let s1 = math3d::project_to_screen(vp, p1, 1280.0, 800.0).unwrap();
+        let deg_y = math3d::apply_gizmo_drag(
+            &mut tr,
+            ToolMode::Rotate,
+            GizmoAxis::Y,
+            world_axes,
+            world_axes,
+            cam_r,
+            cam_u,
+            cam_f,
+            vp,
+            inv_vp,
+            eye,
+            1280.0,
+            800.0,
+            pivot,
+            s0.0,
+            s0.1,
+            s1.0,
+            s1.1,
+        );
+        assert!((deg_y - 30.0).abs() < 2.0, "Ray-plane ring drag must measure ~30 deg, got {deg_y}");
+        let r_new = math3d::Mat4::rot_zyx_deg(tr.rot[0], tr.rot[1], tr.rot[2]);
+        // Pure +Y delta preserves global Y column of r_delta = r_new * r_old^T (i.e. r_new * r_old^T * Y == Y)
+        let r_old_t = math3d::Mat4 {
+            m: [
+                r_old.m[0], r_old.m[4], r_old.m[8], 0.0,
+                r_old.m[1], r_old.m[5], r_old.m[9], 0.0,
+                r_old.m[2], r_old.m[6], r_old.m[10], 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let r_delta = r_new.mul(r_old_t);
+        let y_img = r_delta.transform_point(math3d::Vec3::new(0.0, 1.0, 0.0));
+        assert!((y_img.y - 1.0).abs() < 1e-3 && y_img.x.abs() < 1e-3 && y_img.z.abs() < 1e-3, "Axis must remain pure World Y: {y_img:?}");
+
+        // 3. Move tool XZ planar square & Y arrow keep orthogonal axes exact
+        let xz_pt = pivot.add(math3d::Vec3::new(0.34 * g_scale, 0.0, 0.34 * g_scale));
+        let xz_px = math3d::project_to_screen(vp, xz_pt, 1280.0, 800.0).unwrap();
+        assert_eq!(
+            math3d::pick_gizmo_handle(ToolMode::Move, xz_px.0, xz_px.1, vp, inv_vp, 1280.0, 800.0, pivot, world_axes, cam_r, eye),
+            GizmoAxis::XZ
+        );
+        let mut mv = BoneTransform::IDENTITY;
+        math3d::apply_gizmo_drag(
+            &mut mv,
+            ToolMode::Move,
+            GizmoAxis::XZ,
+            world_axes,
+            world_axes,
+            cam_r,
+            cam_u,
+            cam_f,
+            vp,
+            inv_vp,
+            eye,
+            1280.0,
+            800.0,
+            pivot,
+            xz_px.0,
+            xz_px.1,
+            xz_px.0 + 30.0,
+            xz_px.1 + 20.0,
+        );
+        assert!(mv.pos[1].abs() < 1e-4 && (mv.pos[0].abs() + mv.pos[2].abs()) > 0.5, "XZ plane must keep pos.y == 0: {:?}", mv.pos);
+
+        // 4. Scale tool works consistently from rear perspective too
+        let rear_cam = renderer3d::CameraState { yaw: 3.7, pitch: 0.3, dist: 2.5, target: [0.0, 1.0, 0.0] };
+        let (rvp, rinv, reye) = rear_cam.vp_and_inv(1.6);
+        let (rcr, rcu, rcf) = math3d::camera_basis(rear_cam.yaw, rear_cam.pitch);
+        let sx_px0 = math3d::project_to_screen(rvp, pivot, 1280.0, 800.0).unwrap();
+        let sx_px1 = math3d::project_to_screen(rvp, pivot.add(world_axes[0].mul(g_scale)), 1280.0, 800.0).unwrap();
+        let mut sc = BoneTransform::IDENTITY;
+        math3d::apply_gizmo_drag(
+            &mut sc,
+            ToolMode::Scale,
+            GizmoAxis::X,
+            world_axes,
+            world_axes,
+            rcr,
+            rcu,
+            rcf,
+            rvp,
+            rinv,
+            reye,
+            1280.0,
+            800.0,
+            pivot,
+            sx_px0.0,
+            sx_px0.1,
+            sx_px1.0,
+            sx_px1.1,
+        );
+        assert!(sc.scale[0] > 1.05 && (sc.scale[1] - 1.0).abs() < 1e-5, "Scale X from rear view must grow scale[0]: {:?}", sc.scale);
+    }
+
+    #[test]
+    fn touchpad_and_mouse_smooth_orbit_pan_zoom_and_timeline_zoom_stay_gentle() {
+        let mut s = AppState::new(std::env::temp_dir());
+        let orig_yaw = s.main_cam.current.yaw;
+        let orig_dist = s.main_cam.current.dist;
+        let orig_tgt = s.main_cam.current.target;
+
+        // 1. orbit_smooth advances immediately (zero lag) and settles smoothly within <8 frames
+        s.main_cam.orbit_smooth(25.0, -10.0, 0.008, 0.0072, -1.25, 1.48);
+        assert!(s.main_cam.current.yaw < orig_yaw, "Must move immediately on first frame");
+        assert!(s.main_cam.current.yaw > s.main_cam.target_yaw, "Leaves remaining glide for damping");
+        for _ in 0..8 {
+            s.main_cam.step_damping(0.016);
+        }
+        assert!((s.main_cam.current.yaw - s.main_cam.target_yaw).abs() < 0.005);
+
+        // 2. Shift + 2-finger scroll pans 2D without changing dist or yaw
+        let yaw_before_pan = s.main_cam.current.yaw;
+        s.queue_viewport_scroll(450.0, 260.0, 900.0, 520.0, 12.0, -8.0, false, true, false);
+        assert!((s.main_cam.current.dist - orig_dist).abs() < 1e-5);
+        assert!((s.main_cam.current.yaw - yaw_before_pan).abs() < 1e-5);
+        assert_ne!(s.main_cam.target_pos, orig_tgt);
+
+        // 3. Alt + 2-finger scroll orbits smoothly without changing dist
+        s.queue_viewport_scroll(450.0, 260.0, 900.0, 520.0, 10.0, 5.0, false, false, true);
+        assert!((s.main_cam.current.dist - orig_dist).abs() < 1e-5);
+
+        // 4. Horizontal two-finger swipe orbits yaw smoothly
+        let yaw_before_swipe = s.main_cam.target_yaw;
+        s.queue_viewport_scroll(450.0, 260.0, 900.0, 520.0, 12.0, 1.0, false, false, false);
+        assert!((s.main_cam.target_yaw - yaw_before_swipe).abs() > 0.01);
+
+        // 5. Pinch / Ctrl + scroll zooms smoothly
+        let dist_before_pinch = s.main_cam.current.dist;
+        s.queue_viewport_scroll(450.0, 260.0, 900.0, 520.0, 0.0, 10.0, true, false, false);
+        assert!(s.main_cam.current.dist < dist_before_pinch);
+
+        // 6. Timeline touchpad zoom curve stays gentle (~1.013x for dy=6px, never 1.35^6)
+        let tl_factor = (6.0_f32 * 0.0022).clamp(-0.32, 0.32).exp();
+        assert!(tl_factor > 1.01 && tl_factor < 1.02, "Touchpad timeline zoom factor={tl_factor}");
+    }
+
+    #[test]
+    fn body_moves_upper_rig_and_crouch_simulates_knees_with_clean_defaults() {
+        let mut s = AppState::new(std::env::temp_dir());
+        assert!(!s.onion, "Onion skin must start disabled");
+        assert!(!s.trail, "Weapon trail must start disabled");
+        assert!(s.auto_crouch_knees, "Auto crouch knees must start enabled");
+
+        // 1. Moving and tilting torso (`body` = 1) carries head (2), both arms (3, 4), and held items (5, 9)
+        let rest_mats = math3d::evaluate_rig_matrices(&crate::model::RigPose::ZERO);
+        let mut torso_pose = crate::model::RigPose::ZERO;
+        torso_pose.0[1].pos = [2.0, -4.0, 1.0];
+        torso_pose.0[1].rot = [25.0, 0.0, 0.0];
+        let moved_mats = math3d::evaluate_rig_matrices(&torso_pose);
+
+        for b in [1usize, 2, 3, 4, 5, 9] {
+            let p0 = rest_mats[b].transform_point(math3d::Vec3::ZERO);
+            let p1 = moved_mats[b].transform_point(math3d::Vec3::ZERO);
+            let delta = p1.sub(p0).len();
+            assert!(delta > 0.05, "Bone {b} must follow body transform (delta={delta})");
+        }
+        // Legs remain untouched until knee-crouch simulation runs
+        assert!(moved_mats[6].transform_point(math3d::Vec3::ZERO).sub(rest_mats[6].transform_point(math3d::Vec3::ZERO)).len() < 1e-5);
+        assert!(moved_mats[7].transform_point(math3d::Vec3::ZERO).sub(rest_mats[7].transform_point(math3d::Vec3::ZERO)).len() < 1e-5);
+
+        // 2. Lowering torso triggers knee-bend crouch legs and pulls them back upright cleanly
+        let ki = s.editable_kf_index();
+        s.active_clip_mut().keyframes[ki].bones.0[1].pos = [0.0, -3.0, 0.0];
+        s.sync_crouch_knees_if_enabled(ki, 1);
+        let crouched = s.active_clip().keyframes[ki].bones;
+        assert!(crouched.0[6].pos[1] < -0.5 && crouched.0[6].pos[1] >= -3.0, "right_leg hip drops with torso without clipping: {}", crouched.0[6].pos[1]);
+        assert!(crouched.0[7].pos[1] < -0.5 && crouched.0[7].pos[1] >= -3.0, "left_leg hip drops with torso without clipping: {}", crouched.0[7].pos[1]);
+        assert!(math3d::feet_lowest_world_y(&math3d::evaluate_rig_matrices_raw(&crouched)) >= -1e-4);
+        assert!(crouched.0[6].rot[0] < -20.0 && crouched.0[7].rot[0] > 20.0, "Knees must bend in opposing crouch stance: {:?}", [crouched.0[6].rot[0], crouched.0[7].rot[0]]);
+
+        s.active_clip_mut().keyframes[ki].bones.0[1].pos = [0.0, 0.0, 0.0];
+        s.sync_crouch_knees_if_enabled(ki, 1);
+        let reset = s.active_clip().keyframes[ki].bones;
+        assert_eq!(reset.0[6], BoneTransform::IDENTITY);
+        assert_eq!(reset.0[7], BoneTransform::IDENTITY);
+    }
+
+    #[test]
+    fn feet_never_penetrate_floor_during_crouch_leg_drag_or_root_drop() {
+        let mut s = AppState::new(std::env::temp_dir());
+        let ki = s.editable_kf_index();
+
+        // 1. Lowering `root` underground clamps `root.pos[1]` back onto floor
+        s.active_clip_mut().keyframes[ki].bones.0[8].pos = [0.0, -10.0, 0.0];
+        assert!(s.clamp_edited_bone_above_floor(ki, 8));
+        assert!(s.active_clip().keyframes[ki].bones.0[8].pos[1] >= -1e-4);
+        let mats_root = math3d::evaluate_rig_matrices(&s.active_clip().keyframes[ki].bones);
+        assert!(math3d::feet_lowest_world_y(&mats_root) >= -1e-4);
+
+        // 2. Dropping + tilting an individual leg keeps boot corners at or above y=0
+        s.active_clip_mut().keyframes[ki].bones.0[6] = BoneTransform {
+            pos: [0.0, -6.0, 0.0],
+            rot: [35.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        assert!(s.clamp_edited_bone_above_floor(ki, 6));
+        let mats_leg = math3d::evaluate_rig_matrices(&s.active_clip().keyframes[ki].bones);
+        assert!(math3d::leg_lowest_world_y(mats_leg[6]) >= -1e-4);
+
+        // 3. Crouch-knee simulation also lifts crouched boot corners cleanly above floor
+        s.active_clip_mut().keyframes[ki].bones = crate::model::RigPose::ZERO;
+        s.active_clip_mut().keyframes[ki].bones.0[1].pos = [0.0, -4.0, 0.0];
+        s.sync_crouch_knees_if_enabled(ki, 1);
+        let raw_crouch = math3d::evaluate_rig_matrices_raw(&s.active_clip().keyframes[ki].bones);
+        assert!(
+            math3d::feet_lowest_world_y(&raw_crouch) >= -1e-4,
+            "Crouched feet raw world Y dipped below floor: {}",
+            math3d::feet_lowest_world_y(&raw_crouch)
+        );
+
+        // 4. Direct evaluate_rig_matrices safety net catches arbitrary underground poses
+        let mut underground = crate::model::RigPose::ZERO;
+        underground.0[8].pos = [0.0, -14.0, 0.0];
+        let safe_mats = math3d::evaluate_rig_matrices(&underground);
+        assert!(math3d::feet_lowest_world_y(&safe_mats) >= -1e-4);
     }
 }

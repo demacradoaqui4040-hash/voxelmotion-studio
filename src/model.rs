@@ -486,17 +486,6 @@ pub enum ClipSource {
 }
 
 impl ClipSource {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Personalizado => "Custom",
-            Self::RellSeas => "RELL Seas",
-            Self::BetterCombat => "Better Combat",
-            Self::SimplySwords => "Simply Swords",
-            Self::CombatRoll => "Combat Roll",
-            Self::FluidFoolish => "Fluid & Foolish",
-        }
-    }
-
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Personalizado => "Custom",
@@ -822,6 +811,7 @@ pub fn snap_clip_to_fps(clip: &mut ClipDef, fps: f32) {
     }
 }
 
+#[cfg(test)]
 pub fn snap_clip_to_frame_grid(clip: &mut ClipDef) {
     snap_clip_to_fps(clip, 60.0);
 }

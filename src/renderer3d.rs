@@ -1,9 +1,10 @@
 // VoxelMotion Studio - Hardware DirectX12/Vulkan Zero-Copy wgpu 30 Multi-Viewport Renderer
 
 use crate::math3d::{
-    camera_basis, evaluate_rig_matrices, gizmo_axes_for_space, GizmoAxis, Mat4, Vec3,
+    camera_basis, evaluate_rig_matrices, gizmo_axes_for_space, gizmo_world_scale, GizmoAxis, Mat4,
+    Vec3,
 };
-use crate::model::{sample_clip_pose, ClipDef, RigPose, VfxKind, WeaponCategory, BONE_COUNT};
+use crate::model::{sample_clip_pose, ClipDef, RigPose, ToolMode, VfxKind, WeaponCategory, BONE_COUNT};
 use crate::voxelizer::{
     build_character_bone_meshes, build_sakura_world_mesh, build_training_dummy_mesh,
     voxelize_weapon_sprite, MeshData, Vertex3D,
@@ -177,6 +178,7 @@ pub struct RenderParams<'a> {
     pub show_onion: bool,
     pub show_trail: bool,
     pub show_gizmo: bool,
+    pub tool_mode: ToolMode,
     pub gizmo_world_space: bool,
     pub show_offhand_weapon: bool,
     pub bg_mode: f32, // 0=Studio, 1=Sakura, 2=Ocean
@@ -264,8 +266,15 @@ pub struct GpuRenderer {
     sakura_world: Option<GpuMesh>,
     training_dummy: Option<GpuMesh>,
     shadow_disk: GpuMesh,
-    gizmo_ring: GpuMesh,
-    gizmo_axes: [GpuMesh; 4], // X red, Y green, Z blue, center handle
+    gizmo_roll_ring: GpuMesh,
+    gizmo_rot_rings: [GpuMesh; 3],
+    gizmo_axis_spines: [GpuMesh; 3],
+    gizmo_trackball_core: GpuMesh,
+    gizmo_move_arrows: [GpuMesh; 3],
+    gizmo_move_planes: [GpuMesh; 3],
+    gizmo_move_center: GpuMesh,
+    gizmo_scale_handles: [GpuMesh; 3],
+    gizmo_scale_center: GpuMesh,
     pub weapon_cache: WeaponMeshCache,
     dynamic_vb: wgpu::Buffer,
     dynamic_ib: wgpu::Buffer,
@@ -275,27 +284,188 @@ pub struct GpuRenderer {
     thumb_msaa_views: Option<(wgpu::TextureView, wgpu::TextureView)>,
 }
 
-fn make_axis_handle_mesh(axis: usize) -> MeshData {
-    let mut m = MeshData::new();
+fn axis_rgb(axis: usize) -> [f32; 3] {
     match axis {
-        0 => {
-            let c = [0.96, 0.24, 0.22];
-            m.push_box([0.04, -0.011, -0.011, 0.36, 0.011, 0.011], c);
-            m.push_box([0.36, -0.026, -0.026, 0.42, 0.026, 0.026], c);
+        0 => [0.98, 0.26, 0.24],
+        1 => [0.22, 0.86, 0.38],
+        _ => [0.10, 0.56, 1.00],
+    }
+}
+
+fn push_axis_aligned_cylinder(
+    m: &mut MeshData,
+    axis: usize,
+    s0: f32,
+    s1: f32,
+    r0: f32,
+    r1: f32,
+    segs: usize,
+    color: [f32; 4],
+) {
+    let basis = |s: f32, a: f32, r: f32| -> ([f32; 3], [f32; 3]) {
+        let (sn, cs) = a.sin_cos();
+        let (u, v) = (cs * r, sn * r);
+        match axis {
+            0 => ([s, u, v], [0.0, cs, sn]),
+            1 => ([u, s, v], [cs, 0.0, sn]),
+            _ => ([u, v, s], [cs, sn, 0.0]),
         }
-        1 => {
-            let c = [0.19, 0.82, 0.35];
-            m.push_box([-0.011, 0.04, -0.011, 0.011, 0.36, 0.011], c);
-            m.push_box([-0.026, 0.36, -0.026, 0.026, 0.42, 0.026], c);
+    };
+    for i in 0..segs {
+        let a0 = (i as f32 / segs as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32 / segs as f32) * std::f32::consts::TAU;
+        let (p00, n0) = basis(s0, a0, r0);
+        let (p01, n1) = basis(s0, a1, r0);
+        let (p11, _) = basis(s1, a1, r1);
+        let (p10, _) = basis(s1, a0, r1);
+        let n = [
+            (n0[0] + n1[0]) * 0.5,
+            (n0[1] + n1[1]) * 0.5,
+            (n0[2] + n1[2]) * 0.5,
+        ];
+        m.push_quad(p00, p01, p11, p10, n, color);
+    }
+    if r0 > 1e-4 {
+        let cap_n = match axis {
+            0 => [-1.0, 0.0, 0.0],
+            1 => [0.0, -1.0, 0.0],
+            _ => [0.0, 0.0, -1.0],
+        };
+        let center = match axis {
+            0 => [s0, 0.0, 0.0],
+            1 => [0.0, s0, 0.0],
+            _ => [0.0, 0.0, s0],
+        };
+        for i in 0..segs {
+            let a0 = (i as f32 / segs as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / segs as f32) * std::f32::consts::TAU;
+            let (p0, _) = basis(s0, a0, r0);
+            let (p1, _) = basis(s0, a1, r0);
+            m.push_quad(center, p1, p0, center, cap_n, color);
         }
-        2 => {
-            let c = [0.04, 0.52, 1.0];
-            m.push_box([-0.011, -0.011, 0.04, 0.011, 0.011, 0.36], c);
-            m.push_box([-0.026, -0.026, 0.36, 0.026, 0.026, 0.42], c);
+    }
+}
+
+fn make_torus_ring_mesh(axis: usize, radius: f32, tube_r: f32) -> MeshData {
+    let mut m = MeshData::new();
+    let c = axis_rgb(axis);
+    let col = [c[0], c[1], c[2], 1.0];
+    let segs = 48usize;
+    let sides = 6usize;
+    let ring_pt = |theta: f32, phi: f32| -> ([f32; 3], [f32; 3]) {
+        let (st, ct) = theta.sin_cos();
+        let (sp, cp) = phi.sin_cos();
+        let r = radius + cp * tube_r;
+        let (u, v, w) = (ct * r, st * r, sp * tube_r);
+        let (nu, nv, nw) = (ct * cp, st * cp, sp);
+        match axis {
+            0 => ([w, u, v], [nw, nu, nv]), // YZ plane
+            1 => ([v, w, u], [nv, nw, nu]), // XZ plane
+            _ => ([u, v, w], [nu, nv, nw]), // XY plane
         }
-        _ => {
-            m.push_box([-0.044, -0.044, -0.044, 0.044, 0.044, 0.044], [0.96, 0.96, 0.98]);
+    };
+    for i in 0..segs {
+        let t0 = (i as f32 / segs as f32) * std::f32::consts::TAU;
+        let t1 = ((i + 1) as f32 / segs as f32) * std::f32::consts::TAU;
+        for j in 0..sides {
+            let p0 = (j as f32 / sides as f32) * std::f32::consts::TAU;
+            let p1 = ((j + 1) as f32 / sides as f32) * std::f32::consts::TAU;
+            let (v00, n0) = ring_pt(t0, p0);
+            let (v10, n1) = ring_pt(t1, p0);
+            let (v11, _) = ring_pt(t1, p1);
+            let (v01, _) = ring_pt(t0, p1);
+            let n = [
+                (n0[0] + n1[0]) * 0.5,
+                (n0[1] + n1[1]) * 0.5,
+                (n0[2] + n1[2]) * 0.5,
+            ];
+            m.push_quad(v00, v10, v11, v01, n, col);
         }
+    }
+    m
+}
+
+fn make_axis_spine_mesh(axis: usize) -> MeshData {
+    let mut m = MeshData::new();
+    let c = axis_rgb(axis);
+    push_axis_aligned_cylinder(&mut m, axis, -1.35, 1.35, 0.012, 0.012, 6, [c[0], c[1], c[2], 0.88]);
+    m
+}
+
+fn make_move_arrow_mesh(axis: usize) -> MeshData {
+    let mut m = MeshData::new();
+    let c = axis_rgb(axis);
+    let col = [c[0], c[1], c[2], 1.0];
+    push_axis_aligned_cylinder(&mut m, axis, 0.08, 0.82, 0.024, 0.024, 8, col);
+    push_axis_aligned_cylinder(&mut m, axis, 0.82, 1.08, 0.076, 0.0, 10, col);
+    m
+}
+
+fn make_move_plane_mesh(plane: usize) -> MeshData {
+    let mut m = MeshData::new();
+    // 0: XY (blue Z normal), 1: XZ (green Y normal), 2: YZ (red X normal)
+    let c = match plane {
+        0 => axis_rgb(2),
+        1 => axis_rgb(1),
+        _ => axis_rgb(0),
+    };
+    let fill = [c[0], c[1], c[2], 0.34];
+    let rim = [c[0], c[1], c[2], 0.92];
+    let (a, b) = (0.21f32, 0.47f32);
+    let t = 0.020f32;
+    let pt = |u: f32, v: f32| -> [f32; 3] {
+        match plane {
+            0 => [u, v, 0.0],
+            1 => [u, 0.0, v],
+            _ => [0.0, u, v],
+        }
+    };
+    let n = match plane {
+        0 => [0.0, 0.0, 1.0],
+        1 => [0.0, 1.0, 0.0],
+        _ => [1.0, 0.0, 0.0],
+    };
+    m.push_quad(pt(a, a), pt(b, a), pt(b, b), pt(a, b), n, fill);
+    // Crisp border strips
+    m.push_quad(pt(a, b - t), pt(b, b - t), pt(b, b), pt(a, b), n, rim);
+    m.push_quad(pt(b - t, a), pt(b, a), pt(b, b), pt(b - t, b), n, rim);
+    m
+}
+
+fn make_scale_handle_mesh(axis: usize) -> MeshData {
+    let mut m = MeshData::new();
+    let c = axis_rgb(axis);
+    let col = [c[0], c[1], c[2], 1.0];
+    push_axis_aligned_cylinder(&mut m, axis, 0.08, 0.86, 0.022, 0.022, 8, col);
+    let r = 0.082f32;
+    let b = match axis {
+        0 => [0.86, -r, -r, 1.04, r, r],
+        1 => [-r, 0.86, -r, r, 1.04, r],
+        _ => [-r, -r, 0.86, r, r, 1.04],
+    };
+    m.push_box(b, c);
+    m
+}
+
+fn make_octahedron_mesh(r: f32, color: [f32; 4]) -> MeshData {
+    let mut m = MeshData::new();
+    let px = [r, 0.0, 0.0];
+    let nx = [-r, 0.0, 0.0];
+    let py = [0.0, r, 0.0];
+    let ny = [0.0, -r, 0.0];
+    let pz = [0.0, 0.0, r];
+    let nz = [0.0, 0.0, -r];
+    for (p0, p1, p2, n) in [
+        (py, pz, px, [0.58, 0.58, 0.58]),
+        (py, px, nz, [0.58, 0.58, -0.58]),
+        (py, nz, nx, [-0.58, 0.58, -0.58]),
+        (py, nx, pz, [-0.58, 0.58, 0.58]),
+        (ny, px, pz, [0.58, -0.58, 0.58]),
+        (ny, nz, px, [0.58, -0.58, -0.58]),
+        (ny, nx, nz, [-0.58, -0.58, -0.58]),
+        (ny, pz, nx, [-0.58, -0.58, 0.58]),
+    ] {
+        m.push_quad(p0, p1, p2, p2, n, color);
     }
     m
 }
@@ -511,13 +681,37 @@ impl GpuRenderer {
         ];
         let mesh_staging_cpu = vec![0u8; (mesh_ubo_stride * max_slots) as usize];
         let shadow_disk = GpuMesh::from_data(&device, &make_shadow_disk(36));
-        let gizmo_ring = GpuMesh::from_data(&device, &make_ring_mesh(5.8, 0.08, 64, [0.90, 0.92, 0.96, 0.24]));
-        let gizmo_axes = [
-            GpuMesh::from_data(&device, &make_axis_handle_mesh(0)),
-            GpuMesh::from_data(&device, &make_axis_handle_mesh(1)),
-            GpuMesh::from_data(&device, &make_axis_handle_mesh(2)),
-            GpuMesh::from_data(&device, &make_axis_handle_mesh(3)),
+        let gizmo_roll_ring = GpuMesh::from_data(&device, &make_ring_mesh(1.18, 0.024, 64, [0.92, 0.94, 0.98, 0.56]));
+        let gizmo_rot_rings = [
+            GpuMesh::from_data(&device, &make_torus_ring_mesh(0, 1.0, 0.026)),
+            GpuMesh::from_data(&device, &make_torus_ring_mesh(1, 1.0, 0.026)),
+            GpuMesh::from_data(&device, &make_torus_ring_mesh(2, 1.0, 0.026)),
         ];
+        let gizmo_axis_spines = [
+            GpuMesh::from_data(&device, &make_axis_spine_mesh(0)),
+            GpuMesh::from_data(&device, &make_axis_spine_mesh(1)),
+            GpuMesh::from_data(&device, &make_axis_spine_mesh(2)),
+        ];
+        let gizmo_trackball_core = GpuMesh::from_data(&device, &make_octahedron_mesh(0.088, [0.96, 0.97, 1.0, 0.86]));
+        let gizmo_move_arrows = [
+            GpuMesh::from_data(&device, &make_move_arrow_mesh(0)),
+            GpuMesh::from_data(&device, &make_move_arrow_mesh(1)),
+            GpuMesh::from_data(&device, &make_move_arrow_mesh(2)),
+        ];
+        let gizmo_move_planes = [
+            GpuMesh::from_data(&device, &make_move_plane_mesh(0)),
+            GpuMesh::from_data(&device, &make_move_plane_mesh(1)),
+            GpuMesh::from_data(&device, &make_move_plane_mesh(2)),
+        ];
+        let gizmo_move_center = GpuMesh::from_data(&device, &make_octahedron_mesh(0.095, [0.96, 0.97, 1.0, 0.94]));
+        let gizmo_scale_handles = [
+            GpuMesh::from_data(&device, &make_scale_handle_mesh(0)),
+            GpuMesh::from_data(&device, &make_scale_handle_mesh(1)),
+            GpuMesh::from_data(&device, &make_scale_handle_mesh(2)),
+        ];
+        let mut sc_center = MeshData::new();
+        sc_center.push_box([-0.09, -0.09, -0.09, 0.09, 0.09, 0.09], [0.96, 0.97, 1.0]);
+        let gizmo_scale_center = GpuMesh::from_data(&device, &sc_center);
 
         let dynamic_vb = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -552,8 +746,15 @@ impl GpuRenderer {
             sakura_world: None,
             training_dummy: None,
             shadow_disk,
-            gizmo_ring,
-            gizmo_axes,
+            gizmo_roll_ring,
+            gizmo_rot_rings,
+            gizmo_axis_spines,
+            gizmo_trackball_core,
+            gizmo_move_arrows,
+            gizmo_move_planes,
+            gizmo_move_center,
+            gizmo_scale_handles,
+            gizmo_scale_center,
             weapon_cache: WeaponMeshCache::new(MAX_CACHED_WEAPON_MESHES),
             dynamic_vb,
             dynamic_ib,
@@ -755,7 +956,7 @@ impl GpuRenderer {
             m.indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
         }
 
-        let (tip_now, base_now, _, hand_wm) = pts[pts.len() - 1];
+        let (tip_now, base_now, _, _) = pts[pts.len() - 1];
         let spark_center = tip_now.mul(0.65).add(base_now.mul(0.35));
 
         // Timeline VFX Events (`ParrySpark`, `SonarRing`, `HitStop`) inspired by HakiVoxelVfxManager
@@ -830,7 +1031,6 @@ impl GpuRenderer {
                 VfxKind::SlashTrail | VfxKind::ScreenShake => {}
             }
         }
-        let _ = hand_wm;
 
         if impact_flash > 0.05 {
             let fwd = eye.sub(tip_now).norm();
@@ -1089,7 +1289,11 @@ impl GpuRenderer {
             slot += 1;
         }
 
-        let mut gizmo_draws: Vec<(u32, usize)> = Vec::new(); // usize: 99 = ring, 0..=3 = X/Y/Z/center
+        // gizmo mesh kinds:
+        // 0..=2 = rot_rings, 3 = roll_ring, 4 = trackball_core, 5..=7 = spines,
+        // 10..=12 = move_arrows, 13..=15 = move_planes, 16 = move_center,
+        // 20..=22 = scale_handles, 23 = scale_center
+        let mut gizmo_draws: Vec<(u32, usize)> = Vec::new();
         if params.show_gizmo && surface_idx == 0 {
             let bone_m = if params.solo_weapon {
                 weapon_model
@@ -1098,45 +1302,83 @@ impl GpuRenderer {
             };
             let (pivot_world, axes) =
                 gizmo_axes_for_space(bone_m, params.solo_weapon, params.gizmo_world_space);
-            let hl = if params.active_gizmo != GizmoAxis::None { params.active_gizmo } else { params.hovered_gizmo };
-            let axis_tint = |axis: GizmoAxis| -> [f32; 4] {
-                if hl == axis {
-                    [1.75, 1.60, 0.55, 3.0]
+            let g_scale = gizmo_world_scale(eye, pivot_world);
+            let active = params.active_gizmo;
+            let hl = if active != GizmoAxis::None { active } else { params.hovered_gizmo };
+
+            let handle_tint = |axis: GizmoAxis, shader_mode: f32| -> [f32; 4] {
+                if active != GizmoAxis::None {
+                    if active == axis {
+                        [1.45, 1.45, 1.45, shader_mode]
+                    } else {
+                        [0.42, 0.42, 0.46, shader_mode]
+                    }
+                } else if hl == axis {
+                    [1.42, 1.38, 1.24, shader_mode]
                 } else {
-                    [1.0, 1.0, 1.0, 3.0]
+                    [1.0, 1.0, 1.0, shader_mode]
                 }
             };
 
             let (cam_r, cam_u, cam_f) = camera_basis(params.camera.yaw, params.camera.pitch);
-            let g_ring = Mat4 {
+            let g_billboard = Mat4 {
                 m: [
-                    cam_r.x / 16.0, cam_r.y / 16.0, cam_r.z / 16.0, 0.0,
-                    cam_u.x / 16.0, cam_u.y / 16.0, cam_u.z / 16.0, 0.0,
-                    -cam_f.x / 16.0, -cam_f.y / 16.0, -cam_f.z / 16.0, 0.0,
+                    cam_r.x * g_scale, cam_r.y * g_scale, cam_r.z * g_scale, 0.0,
+                    cam_u.x * g_scale, cam_u.y * g_scale, cam_u.z * g_scale, 0.0,
+                    -cam_f.x * g_scale, -cam_f.y * g_scale, -cam_f.z * g_scale, 0.0,
                     pivot_world.x, pivot_world.y, pivot_world.z, 1.0,
                 ],
             };
-            let ring_t = if hl == GizmoAxis::Roll { [1.5, 1.4, 0.7, 3.0] } else { [1.0, 1.0, 1.0, 3.0] };
-            gizmo_draws.push((write_slot(slot, g_ring.m, ring_t), 99));
-            slot += 1;
-
             let g_axes_m = Mat4 {
                 m: [
-                    axes[0].x, axes[0].y, axes[0].z, 0.0,
-                    axes[1].x, axes[1].y, axes[1].z, 0.0,
-                    axes[2].x, axes[2].y, axes[2].z, 0.0,
+                    axes[0].x * g_scale, axes[0].y * g_scale, axes[0].z * g_scale, 0.0,
+                    axes[1].x * g_scale, axes[1].y * g_scale, axes[1].z * g_scale, 0.0,
+                    axes[2].x * g_scale, axes[2].y * g_scale, axes[2].z * g_scale, 0.0,
                     pivot_world.x, pivot_world.y, pivot_world.z, 1.0,
                 ],
             };
-            let axis_kinds = [
-                (0usize, GizmoAxis::X),
-                (1usize, GizmoAxis::Y),
-                (2usize, GizmoAxis::Z),
-                (3usize, GizmoAxis::Free),
-            ];
-            for (kind, ax_enum) in axis_kinds {
-                gizmo_draws.push((write_slot(slot, g_axes_m.m, axis_tint(ax_enum)), kind));
-                slot += 1;
+
+            match params.tool_mode {
+                ToolMode::Rotate => {
+                    gizmo_draws.push((write_slot(slot, g_billboard.m, handle_tint(GizmoAxis::Roll, 6.0)), 3));
+                    slot += 1;
+                    for (idx, ax) in [(0usize, GizmoAxis::X), (1usize, GizmoAxis::Y), (2usize, GizmoAxis::Z)] {
+                        gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(ax, 7.0)), idx));
+                        slot += 1;
+                    }
+                    gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(GizmoAxis::Free, 6.0)), 4));
+                    slot += 1;
+                    if let Some(spine_idx) = match active {
+                        GizmoAxis::X => Some(5usize),
+                        GizmoAxis::Y => Some(6usize),
+                        GizmoAxis::Z => Some(7usize),
+                        _ => None,
+                    } {
+                        gizmo_draws.push((write_slot(slot, g_axes_m.m, [1.35, 1.35, 1.35, 6.0]), spine_idx));
+                        slot += 1;
+                    }
+                }
+                ToolMode::Move => {
+                    for (idx, ax) in [(13usize, GizmoAxis::XY), (14usize, GizmoAxis::XZ), (15usize, GizmoAxis::YZ)] {
+                        gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(ax, 6.0)), idx));
+                        slot += 1;
+                    }
+                    for (idx, ax) in [(10usize, GizmoAxis::X), (11usize, GizmoAxis::Y), (12usize, GizmoAxis::Z)] {
+                        gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(ax, 6.0)), idx));
+                        slot += 1;
+                    }
+                    gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(GizmoAxis::Free, 6.0)), 16));
+                    slot += 1;
+                }
+                ToolMode::Scale => {
+                    for (idx, ax) in [(20usize, GizmoAxis::X), (21usize, GizmoAxis::Y), (22usize, GizmoAxis::Z)] {
+                        gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(ax, 6.0)), idx));
+                        slot += 1;
+                    }
+                    gizmo_draws.push((write_slot(slot, g_axes_m.m, handle_tint(GizmoAxis::Free, 6.0)), 23));
+                    slot += 1;
+                }
+                _ => {}
             }
         }
         let used_bytes = (slot.min(max_slots) * stride).min(self.mesh_staging_cpu.len());
@@ -1235,13 +1477,23 @@ impl GpuRenderer {
                 rpass.draw_indexed(0..cnt, 0, 0..1);
             }
 
-            // 4. Gizmo Orbit Ring + 3D X/Y/Z Axes Overlay
+            // 4. Distinct Tool Gizmos (Rotate Rings, Move Arrows/Planes, Scale Cubes)
             if !gizmo_draws.is_empty() {
                 rpass.set_pipeline(&self.overlay_pipeline);
                 rpass.set_bind_group(0, &self.cam_bg, &[]);
                 for (off, kind) in gizmo_draws {
                     rpass.set_bind_group(1, &self.mesh_bg, &[off]);
-                    let gm = if kind == 99 { &self.gizmo_ring } else { &self.gizmo_axes[kind] };
+                    let gm = match kind {
+                        0..=2 => &self.gizmo_rot_rings[kind],
+                        3 => &self.gizmo_roll_ring,
+                        4 => &self.gizmo_trackball_core,
+                        5..=7 => &self.gizmo_axis_spines[kind - 5],
+                        10..=12 => &self.gizmo_move_arrows[kind - 10],
+                        13..=15 => &self.gizmo_move_planes[kind - 13],
+                        16 => &self.gizmo_move_center,
+                        20..=22 => &self.gizmo_scale_handles[kind - 20],
+                        _ => &self.gizmo_scale_center,
+                    };
                     rpass.set_vertex_buffer(0, gm.vb.slice(..));
                     rpass.set_index_buffer(gm.ib.slice(..), wgpu::IndexFormat::Uint32);
                     rpass.draw_indexed(0..gm.index_count, 0, 0..1);

@@ -232,6 +232,23 @@ fn fs_lit(in: VertOut) -> @location(0) vec4<f32> {
         // Emissive / unlit gizmo / contact shadow
         return vec4<f32>(in.color.rgb * mesh.tint.rgb, in.color.a * mesh.tint.a);
     }
+    if (mesh.tint.w > 5.5 && mesh.tint.w < 6.5) {
+        // 3D Gizmo solid / planar handles with clean view-aligned bevel lighting
+        let n = normalize(in.world_n);
+        let view_dir = normalize(cam.cam_pos.xyz - in.world_pos);
+        let shade = 0.78 + 0.24 * abs(dot(n, view_dir));
+        return vec4<f32>(in.color.rgb * mesh.tint.rgb * shade, in.color.a);
+    }
+    if (mesh.tint.w >= 6.5) {
+        // 3D Gizmo Rotate Ring: fade back hemisphere gracefully so front/back arcs read clearly from any angle
+        let pivot_w = mesh.model[3].xyz;
+        let radial = normalize(in.world_pos - pivot_w);
+        let to_cam = normalize(cam.cam_pos.xyz - pivot_w);
+        let hemi_alpha = mix(0.20, 1.0, smoothstep(-0.18, 0.14, dot(radial, to_cam)));
+        let n = normalize(in.world_n);
+        let shade = 0.84 + 0.20 * abs(dot(n, to_cam));
+        return vec4<f32>(in.color.rgb * mesh.tint.rgb * shade, in.color.a * hemi_alpha);
+    }
 
     let n = normalize(in.world_n);
     let is_sakura = cam.params.x > 0.5 && cam.params.x < 1.5;
