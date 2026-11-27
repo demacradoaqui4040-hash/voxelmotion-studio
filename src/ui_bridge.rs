@@ -12,13 +12,13 @@ use crate::math3d::{
 };
 use crate::model::{
     mirror_pose, next_keyframe_time, prev_keyframe_time, sample_clip_pose, ClipDef,
-    CurationStatus, EasingMode, Keyframe, ToolMode, VfxEvent, VfxKind, WeaponCategory,
-    BONE_COUNT, BONE_LABELS_ES, BONE_NAMES,
+    CurationStatus, EasingMode, GalleryGroup, Keyframe, ToolMode, VfxEvent, VfxKind,
+    WeaponCategory, BONE_COUNT, BONE_LABELS_ES, BONE_NAMES, DISPLAY_BONE_ORDER,
 };
 use crate::renderer3d::GpuRenderer;
 use crate::{
-    CategoryEntry, CategoryRow, FamilyChipRow, GalleryItem, MainWindow, PaletteEntry, RulerTick,
-    Theme, TimelineDiamond, TimelineTrack, VfxEventItem, WeaponListItem,
+    CategoryEntry, CategoryRow, FamilyChipRow, GalleryItem, GalleryRow, MainWindow, PaletteEntry,
+    RulerTick, Theme, TimelineDiamond, TimelineTrack, VfxEventItem, WeaponListItem,
 };
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowExtWindows};
 use slint::winit_030::WinitWindowAccessor;
@@ -210,22 +210,28 @@ fn sync_gallery(state: &AppState, win: &MainWindow) {
     let clip = state.active_clip();
     let active_w = state.active_weapon();
     let visible = state.filtered_clip_indices();
-    let g_items: Vec<GalleryItem> = visible
+    let g_pairs: Vec<(GalleryGroup, GalleryItem)> = visible
         .into_iter()
         .map(|idx| &state.project.clips[idx])
-        .map(|c| GalleryItem {
-            id: c.id.clone().into(),
-            name: c.name.clone().into(),
-            group: format!("{:?}", c.gallery_group).into(),
-            source_label: c.source.short_label().into(),
-            target_label: c.target_badge().into(),
-            compatible: c.allows_weapon(active_w),
-            status_tag: c.status.short_tag().into(),
-            status_idx: c.status.index(),
-            thumb: state.gallery_thumbs.get(&c.id).cloned().unwrap_or_default(),
-            active: c.id == clip.id,
+        .map(|c| {
+            (
+                c.gallery_group,
+                GalleryItem {
+                    id: c.id.clone().into(),
+                    name: c.name.clone().into(),
+                    group: format!("{:?}", c.gallery_group).into(),
+                    source_label: c.source.short_label().into(),
+                    target_label: c.target_badge().into(),
+                    compatible: c.allows_weapon(active_w),
+                    status_tag: c.status.short_tag().into(),
+                    status_idx: c.status.index(),
+                    thumb: state.gallery_thumbs.get(&c.id).cloned().unwrap_or_default(),
+                    active: c.id == clip.id,
+                },
+            )
         })
         .collect();
+    let g_items: Vec<GalleryItem> = g_pairs.iter().map(|(_, it)| it.clone()).collect();
     let existing = win.get_gallery_items();
     let mut patched_in_place = false;
     if let Some(vm) = existing.as_any().downcast_ref::<VecModel<GalleryItem>>() {
@@ -257,6 +263,71 @@ fn sync_gallery(state: &AppState, win: &MainWindow) {
     if !patched_in_place {
         win.set_gallery_items(ModelRc::new(VecModel::from(g_items)));
     }
+
+    const GROUP_ORDER: [(i32, GalleryGroup, &str); 5] = [
+        (0, GalleryGroup::Combate, "Ataques"),
+        (1, GalleryGroup::Defensa, "Defensa"),
+        (2, GalleryGroup::Movimiento, "Movimiento"),
+        (3, GalleryGroup::Especiales, "Especiales"),
+        (4, GalleryGroup::Interaccion, "Interacción"),
+    ];
+    let dummy = GalleryItem::default();
+    let force_open = !state.gallery_search.trim().is_empty() || state.gallery_filter != 0;
+    let mut rows: Vec<GalleryRow> = Vec::new();
+    let mut cursor_y: f32 = 0.0;
+    for &(g_idx, g_variant, g_title) in &GROUP_ORDER {
+        let items_in_group: Vec<&GalleryItem> = g_pairs
+            .iter()
+            .filter_map(|(grp, item)| (*grp == g_variant).then_some(item))
+            .collect();
+        if items_in_group.is_empty() {
+            continue;
+        }
+        let collapsed = !force_open && state.collapsed_gallery_groups[g_idx as usize];
+        if cursor_y > 0.0 {
+            cursor_y += 4.0;
+        }
+        rows.push(GalleryRow {
+            is_header: true,
+            y_px: cursor_y,
+            h_px: 26.0,
+            group_idx: g_idx,
+            header_title: g_title.into(),
+            group_count: items_in_group.len() as i32,
+            collapsed,
+            left: dummy.clone(),
+            has_right: false,
+            right: dummy.clone(),
+        });
+        cursor_y += 30.0;
+        if !collapsed {
+            for pair in items_in_group.chunks(2) {
+                let left = pair[0].clone();
+                let has_right = pair.len() > 1;
+                let right = if has_right {
+                    pair[1].clone()
+                } else {
+                    dummy.clone()
+                };
+                rows.push(GalleryRow {
+                    is_header: false,
+                    y_px: cursor_y,
+                    h_px: 96.0,
+                    group_idx: g_idx,
+                    header_title: "".into(),
+                    group_count: 0,
+                    collapsed: false,
+                    left,
+                    has_right,
+                    right,
+                });
+                cursor_y += 102.0;
+            }
+        }
+    }
+    win.set_gallery_rows(ModelRc::new(VecModel::from(rows)));
+    win.set_gallery_content_h((cursor_y + 4.0).max(200.0));
+
     win.set_gallery_compat_only(state.gallery_compat_only);
     win.set_gallery_source_filter(state.gallery_source_filter);
     win.set_gallery_status_filter(state.gallery_status_filter);
@@ -409,31 +480,62 @@ fn sync_inspector(state: &AppState, win: &MainWindow) {
     win.set_bg_idx(state.bg_mode);
     win.set_auto_keyframe(state.auto_keyframe);
     win.set_show_all_bones(state.show_all_bones);
+    win.set_gizmo_world_space(state.gizmo_world_space);
+    win.set_show_offhand_weapon(state.show_offhand_weapon);
+    win.set_has_custom_skin(state.skin_pixels.is_some());
+    let skin_lbl = if state.skin_pixels.is_some() && !state.skin_name.is_empty() {
+        format!("Skin: {}", state.skin_name)
+    } else {
+        "Skin: Modelo base".to_string()
+    };
+    win.set_skin_label(skin_lbl.into());
+    win.set_skin_slim(state.skin_slim);
+    win.set_skin_outer_layer(state.skin_outer_layer);
     sync_transform_readout(state, win);
 }
 
+fn lane_w_logical(win: &MainWindow) -> f32 {
+    let sf = win.window().scale_factor().max(1.0);
+    let win_phys_w = win.window().size().width;
+    let win_phys_wf = if win_phys_w > 100 {
+        win_phys_w as f32
+    } else {
+        1440.0 * sf
+    };
+    let lane_phys_w = (win_phys_wf - 264.0 * sf).round().max(400.0);
+    (lane_phys_w / sf).max(320.0)
+}
+
 #[inline]
-fn to_timeline_view(norm_frac: f32, view_start: f32, view_span: f32) -> f32 {
-    (norm_frac - view_start) / view_span.max(1e-4)
+fn frame_to_screen_frac(frame_pos: f32, scroll_frame: f32, visible_frames: f32) -> f32 {
+    (frame_pos - scroll_frame) / visible_frames.max(1.0)
 }
 
 fn sync_timeline_meta(state: &AppState, win: &MainWindow) {
     let clip = state.active_clip();
     let dur = clip.duration.max(0.05);
-    let frames = (dur * 60.0).round().max(1.0) as i32;
+    let frames = state.active_total_frames();
     let cur_f = ((state.current_time / dur) * (frames as f32)).round() as i32;
-    let view_start = state.timeline_view_start;
-    let view_span = state.timeline_view_span();
-    let playhead_screen = to_timeline_view((state.current_time / dur).clamp(0.0, 1.0), view_start, view_span);
+    let lane_w = lane_w_logical(win);
+    let vis_f = state.timeline_visible_frames(lane_w);
+    let max_scroll = state.max_scroll_frame(lane_w);
+    let scroll_f = state.timeline_scroll_frame.clamp(0.0, max_scroll);
+    let cur_frame_pos = (state.current_time / dur).clamp(0.0, 1.0) * (frames as f32);
+    let playhead_screen = frame_to_screen_frac(cur_frame_pos, scroll_f, vis_f);
+    let clip_end_screen = frame_to_screen_frac(frames as f32, scroll_f, vis_f);
 
     win.set_current_frame(cur_f.clamp(0, frames));
     win.set_total_frames(frames);
+    win.set_timeline_fps(state.timeline_fps);
     win.set_playhead_frac(playhead_screen.clamp(0.0, 1.0));
     win.set_playhead_visible((-0.005..=1.005).contains(&playhead_screen));
+    win.set_clip_end_frac(clip_end_screen.clamp(0.0, 1.2));
     win.set_timeline_zoom_label(format!("{:.1}x", state.timeline_zoom).into());
-    win.set_timeline_zoomed(state.timeline_zoom > 1.01);
-    win.set_timeline_view_start(view_start);
-    win.set_timeline_view_span(view_span);
+    win.set_timeline_zoomed((state.timeline_zoom - 1.0).abs() > 0.02);
+    win.set_timeline_scrollable(max_scroll > 0.05 || scroll_f > 0.05);
+    let bar_frames = (frames as f32).max(scroll_f + vis_f).max(1.0);
+    win.set_timeline_view_start((scroll_f / bar_frames).clamp(0.0, 1.0));
+    win.set_timeline_view_span((vis_f / bar_frames).clamp(0.05, 1.0));
     win.set_timeline_bone_scope(state.timeline_bone_scope);
     if let Some(ref cb) = state.clipboard_bone {
         win.set_bone_clipboard_count(cb.frames.len() as i32);
@@ -451,7 +553,8 @@ fn sync_timeline_meta(state: &AppState, win: &MainWindow) {
     }
     win.set_has_impact(clip.impact_time.is_some());
     if let Some(imp) = clip.impact_time {
-        let imp_screen = to_timeline_view((imp / dur).clamp(0.0, 1.0), view_start, view_span);
+        let imp_pos = (imp / dur).clamp(0.0, 1.0) * (frames as f32);
+        let imp_screen = frame_to_screen_frac(imp_pos, scroll_f, vis_f);
         win.set_impact_frac(imp_screen.clamp(0.0, 1.0));
         win.set_impact_visible((-0.005..=1.005).contains(&imp_screen));
         win.set_impact_time_text(format!("{imp:.2}s").into());
@@ -462,49 +565,50 @@ fn sync_timeline_meta(state: &AppState, win: &MainWindow) {
     }
 }
 
-pub fn build_ruler_ticks_window(
+pub fn build_ruler_ticks_frames(
     total_frames: i32,
-    view_start: f32,
-    view_span: f32,
+    scroll_frame: f32,
+    visible_frames: f32,
     lane_width_px: f32,
 ) -> Vec<RulerTick> {
     let frames = total_frames.max(1);
-    let span = view_span.clamp(0.125, 1.0);
-    let start = view_start.clamp(0.0, (1.0 - span).max(0.0));
-    let end = (start + span).min(1.0);
+    let vis_f = visible_frames.max(1.0);
+    let scroll_f = scroll_frame.max(0.0);
+    let px_per_frame = lane_width_px.max(320.0) / vis_f;
 
-    let visible_frames = (frames as f32 * span).max(1.0);
-    let px_per_frame = lane_width_px.max(320.0) / visible_frames;
-
-    let (label_step, major_step) = if px_per_frame >= 26.0 {
+    let (label_step, major_step) = if px_per_frame >= 22.0 {
         (1, 5)
-    } else if px_per_frame >= 15.0 {
+    } else if px_per_frame >= 12.0 {
         (2, 10)
-    } else if px_per_frame >= 8.0 {
+    } else if px_per_frame >= 7.0 {
         (5, 10)
     } else {
         (10, 20)
     };
-    let tick_step = if visible_frames <= 95.0 { 1 } else { 2 };
+    let tick_step = if px_per_frame >= 5.0 { 1 } else { 2 };
 
-    let first_f = ((start * frames as f32).floor() as i32 - 1).max(0);
-    let last_f = ((end * frames as f32).ceil() as i32 + 1).min(frames);
+    let first_f = (scroll_f.floor() as i32 - 1).max(0);
+    let last_f = (scroll_f + vis_f).ceil() as i32 + 1;
 
     let mut ticks = Vec::with_capacity(((last_f - first_f) / tick_step + 4).max(2) as usize);
     let mut f = (first_f / tick_step) * tick_step;
     if f < 0 {
         f = 0;
     }
+    let clip_end_visible = frame_to_screen_frac(frames as f32, scroll_f, vis_f) <= 1.005;
     while f <= last_f {
-        let raw_frac = f as f32 / frames as f32;
-        let screen_frac = (raw_frac - start) / span;
+        let screen_frac = frame_to_screen_frac(f as f32, scroll_f, vis_f);
         if (-0.002..=1.002).contains(&screen_frac) {
+            let in_clip = f <= frames;
             let is_end = f == frames;
-            let dist_end_px = (frames - f) as f32 * px_per_frame;
-            let too_close_to_end = !is_end && end >= 0.99 && dist_end_px < 18.0;
+            let dist_end_px = (frames - f).abs() as f32 * px_per_frame;
+            let too_close_to_end =
+                in_clip && !is_end && clip_end_visible && dist_end_px < 18.0;
             let is_major = f == 0 || is_end || (f % major_step == 0);
             let is_mid = !is_major && (f % (major_step / 2).max(1) == 0);
-            let show_label = (is_major && !too_close_to_end) || (!too_close_to_end && f % label_step == 0);
+            let show_label = in_clip
+                && ((is_major && !too_close_to_end)
+                    || (!too_close_to_end && f % label_step == 0));
             ticks.push(RulerTick {
                 frac: screen_frac.clamp(0.0, 1.0),
                 label: if show_label {
@@ -518,15 +622,39 @@ pub fn build_ruler_ticks_window(
         }
         f += tick_step;
     }
-    if end >= 0.999 && ticks.last().map_or(true, |t| (t.frac - 1.0).abs() > 1e-3) {
+    let end_frac = frame_to_screen_frac(frames as f32, scroll_f, vis_f);
+    if (-0.002..=1.002).contains(&end_frac)
+        && ticks
+            .iter()
+            .all(|t| (t.frac - end_frac.clamp(0.0, 1.0)).abs() > 1e-3)
+    {
         ticks.push(RulerTick {
-            frac: 1.0,
+            frac: end_frac.clamp(0.0, 1.0),
             label: format!("{frames}").into(),
             major: true,
             mid: false,
         });
+        ticks.sort_by(|a, b| a.frac.total_cmp(&b.frac));
     }
     ticks
+}
+
+#[cfg(test)]
+pub fn build_ruler_ticks_window(
+    total_frames: i32,
+    view_start: f32,
+    view_span: f32,
+    lane_width_px: f32,
+) -> Vec<RulerTick> {
+    let frames = total_frames.max(1) as f32;
+    let span = view_span.clamp(0.05, 1.0);
+    let start = view_start.clamp(0.0, (1.0 - span).max(0.0));
+    build_ruler_ticks_frames(
+        total_frames,
+        start * frames,
+        (span * frames).max(1.0),
+        lane_width_px,
+    )
 }
 
 #[cfg(test)]
@@ -677,9 +805,7 @@ fn build_ruler_grid_images(
 }
 
 fn sync_timeline_tracks(state: &AppState, win: &MainWindow) {
-    let clip = state.active_clip();
-    let dur = clip.duration.max(0.05);
-    let frames = (dur * 60.0).round().max(1.0) as i32;
+    let frames = state.active_total_frames();
     let sf = win.window().scale_factor().max(1.0);
     let win_phys_w = win.window().size().width;
     let win_phys_wf = if win_phys_w > 100 {
@@ -690,20 +816,20 @@ fn sync_timeline_tracks(state: &AppState, win: &MainWindow) {
     let lane_phys_w = (win_phys_wf - 264.0 * sf).round().max(400.0) as u32;
     let ruler_phys_h = (24.0 * sf).round().max(24.0) as u32;
     let lane_w_logical = (lane_phys_w as f32 / sf).max(320.0);
+    let vis_f = state.timeline_visible_frames(lane_w_logical);
+    let scroll_f = state
+        .timeline_scroll_frame
+        .clamp(0.0, state.max_scroll_frame(lane_w_logical));
 
-    let all_ticks = build_ruler_ticks_window(
-        frames,
-        state.timeline_view_start,
-        state.timeline_view_span(),
-        lane_w_logical,
-    );
+    let all_ticks = build_ruler_ticks_frames(frames, scroll_f, vis_f, lane_w_logical);
     let (notches_img, grid_img) =
         build_ruler_grid_images(&all_ticks, state.theme_idx, lane_phys_w, ruler_phys_h);
     win.set_ruler_notches_img(notches_img);
     win.set_lanes_grid_img(grid_img);
 
-    let all_tracks: Vec<TimelineTrack> = (0..BONE_COUNT)
-        .map(|bi| TimelineTrack {
+    let all_tracks: Vec<TimelineTrack> = DISPLAY_BONE_ORDER
+        .iter()
+        .map(|&bi| TimelineTrack {
             bone_idx: bi as i32,
             name: BONE_LABELS_ES[bi].into(),
             dot_color: bone_color(bi),
@@ -714,9 +840,9 @@ fn sync_timeline_tracks(state: &AppState, win: &MainWindow) {
     win.set_all_bones_tracks(ModelRc::new(VecModel::from(all_tracks)));
 
     let visible_bones: &[usize] = if state.show_all_bones {
-        &[0, 1, 2, 3, 4, 5, 6, 7]
+        &DISPLAY_BONE_ORDER
     } else {
-        &[3, 4, 5, 1]
+        &[8, 3, 4, 5]
     };
     let tracks: Vec<TimelineTrack> = visible_bones
         .iter()
@@ -734,16 +860,21 @@ fn sync_timeline_tracks(state: &AppState, win: &MainWindow) {
 fn sync_timeline_diamonds(state: &AppState, win: &MainWindow) {
     let clip = state.active_clip();
     let dur = clip.duration.max(0.05);
-    let view_start = state.timeline_view_start;
-    let view_span = state.timeline_view_span();
+    let total_frames = state.active_total_frames() as f32;
+    let lane_w = lane_w_logical(win);
+    let vis_f = state.timeline_visible_frames(lane_w);
+    let scroll_f = state
+        .timeline_scroll_frame
+        .clamp(0.0, state.max_scroll_frame(lane_w));
     let visible_bones: &[usize] = if state.show_all_bones {
-        &[0, 1, 2, 3, 4, 5, 6, 7]
+        &DISPLAY_BONE_ORDER
     } else {
-        &[3, 4, 5, 1]
+        &[8, 3, 4, 5]
     };
     let mut diamonds = Vec::new();
     for (ki, kf) in clip.keyframes.iter().enumerate() {
-        let screen_frac = to_timeline_view((kf.time / dur).clamp(0.0, 1.0), view_start, view_span);
+        let kf_pos = (kf.time / dur).clamp(0.0, 1.0) * total_frames;
+        let screen_frac = frame_to_screen_frac(kf_pos, scroll_f, vis_f);
         if !(-0.025..=1.025).contains(&screen_frac) {
             continue;
         }
@@ -791,8 +922,8 @@ fn sync_timeline_diamonds(state: &AppState, win: &MainWindow) {
             .iter()
             .filter(|k| k.has_bone(rb) && k.time >= lo - 0.016 && k.time <= hi + 0.016)
             .count() as i32;
-        let lo_v = to_timeline_view((lo / dur).clamp(0.0, 1.0), view_start, view_span);
-        let hi_v = to_timeline_view((hi / dur).clamp(0.0, 1.0), view_start, view_span);
+        let lo_v = frame_to_screen_frac((lo / dur).clamp(0.0, 1.0) * total_frames, scroll_f, vis_f);
+        let hi_v = frame_to_screen_frac((hi / dur).clamp(0.0, 1.0) * total_frames, scroll_f, vis_f);
         let track_i = if hi_v < 0.0 || lo_v > 1.0 {
             -1
         } else {
@@ -1026,6 +1157,7 @@ pub fn wire_ui_and_gpu(
                         let Ok(mut s) = st.try_borrow_mut() else { return };
                         if s.gpu.is_none() {
                             s.gpu = Some(GpuRenderer::new(device.clone(), queue.clone()));
+                            s.sync_character_mesh_gpu();
                         }
                         s.dirty.main_viewport = true;
                         s.dirty.card_viewport = true;
@@ -1399,7 +1531,7 @@ pub fn wire_ui_and_gpu(
             let mut s = st.borrow_mut();
             let mut active_gizmo = GizmoAxis::None;
             if btn == 0 && !mod_pan && !mod_ctrl && vw > 1.0 && vh > 1.0 {
-                let (pivot, axes, vp) = s.active_gizmo_geom();
+                let (pivot, axes, _, _, vp) = s.active_gizmo_geom();
                 let (cam_r, _, _) =
                     camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
                 let gizmo_shown =
@@ -1444,7 +1576,7 @@ pub fn wire_ui_and_gpu(
                 }
                 return;
             }
-            let (pivot, axes, vp) = s.active_gizmo_geom();
+            let (pivot, axes, _, _, vp) = s.active_gizmo_geom();
             let (cam_r, _, _) = camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
             let next_hl = pick_gizmo_handle(x, y, vp, vw, vh, pivot, axes, cam_r, 0.42, 0.425);
             if next_hl != s.hovered_gizmo {
@@ -1494,7 +1626,7 @@ pub fn wire_ui_and_gpu(
                     s.drag.undo_pushed = true;
                 }
                 s.playing = false;
-                let (pivot, axes, vp) = s.active_gizmo_geom();
+                let (pivot, axes, parent_axes, bone_axes, vp) = s.active_gizmo_geom();
                 let (cam_r, cam_u, cam_f) =
                     camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
                 let axis = s.drag.active_gizmo;
@@ -1511,6 +1643,8 @@ pub fn wire_ui_and_gpu(
                     tmode,
                     axis,
                     axes,
+                    parent_axes,
+                    bone_axes,
                     cam_r,
                     cam_u,
                     cam_f,
@@ -1722,10 +1856,13 @@ pub fn wire_ui_and_gpu(
                 s.note_interaction();
                 s.playing = false;
                 let dur = s.active_clip().duration.max(0.05);
-                let frames = (dur * 60.0).round().max(1.0);
-                let norm = (s.timeline_view_start + screen_frac.clamp(0.0, 1.0) * s.timeline_view_span()).clamp(0.0, 1.0);
-                let f_idx = (norm * frames).round().clamp(0.0, frames);
-                s.current_time = (f_idx / frames) * dur;
+                let frames = s.active_total_frames() as f32;
+                let lane_w = lane_w_logical(&w);
+                let vis_f = s.timeline_visible_frames(lane_w);
+                let frame_pos =
+                    s.timeline_scroll_frame + screen_frac.clamp(0.0, 1.0) * vis_f;
+                let f_idx = frame_pos.round().clamp(0.0, frames);
+                s.current_time = (f_idx / frames.max(1.0)) * dur;
                 s.dirty.main_viewport = true;
                 s.dirty.transform_readout = true;
                 s.dirty.timeline_meta = true;
@@ -1746,11 +1883,12 @@ pub fn wire_ui_and_gpu(
                 } else {
                     1.35_f32.powf(delta)
                 };
-                let mut next_zoom = (s.timeline_zoom * factor).clamp(1.0, 8.0);
-                if next_zoom < 1.04 {
+                let mut next_zoom = (s.timeline_zoom * factor).clamp(0.35, 4.0);
+                if (next_zoom - 1.0).abs() < 0.04 {
                     next_zoom = 1.0;
                 }
-                s.set_timeline_zoom(next_zoom, anchor_screen_frac);
+                let lane_w = lane_w_logical(&w);
+                s.set_timeline_zoom_at(next_zoom, anchor_screen_frac, lane_w);
                 sync_dirty_ui(&mut s, &w);
             }
         });
@@ -1761,7 +1899,8 @@ pub fn wire_ui_and_gpu(
         win.on_reset_timeline_zoom(move || {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
-                s.set_timeline_zoom(1.0, 0.0);
+                let lane_w = lane_w_logical(&w);
+                s.set_timeline_zoom_at(1.0, 0.0, lane_w);
                 sync_dirty_ui(&mut s, &w);
             }
         });
@@ -1772,7 +1911,8 @@ pub fn wire_ui_and_gpu(
         win.on_pan_timeline(move |delta_screen_frac| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
-                s.pan_timeline_view(delta_screen_frac);
+                let lane_w = lane_w_logical(&w);
+                s.pan_timeline_frames(delta_screen_frac, lane_w);
                 sync_dirty_ui(&mut s, &w);
             }
         });
@@ -1783,8 +1923,14 @@ pub fn wire_ui_and_gpu(
         win.on_set_timeline_view_start(move |new_start| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
-                let max_s = (1.0 - s.timeline_view_span()).max(0.0);
-                s.timeline_view_start = new_start.clamp(0.0, max_s);
+                let lane_w = lane_w_logical(&w);
+                let total_frames = s.active_total_frames() as f32;
+                let vis_f = s.timeline_visible_frames(lane_w);
+                let max_scroll = s.max_scroll_frame(lane_w);
+                let bar_frames = total_frames.max(s.timeline_scroll_frame + vis_f).max(1.0);
+                let max_start = (max_scroll / bar_frames).max(0.0);
+                s.timeline_scroll_frame =
+                    (new_start.clamp(0.0, max_start) * bar_frames).clamp(0.0, max_scroll);
                 s.dirty.timeline_meta = true;
                 s.dirty.timeline_tracks = true;
                 s.dirty.timeline_diamonds = true;
@@ -1801,11 +1947,13 @@ pub fn wire_ui_and_gpu(
                 s.note_interaction();
                 s.playing = false;
                 let dur = s.active_clip().duration.max(0.05);
-                let frames = (dur * 60.0).round().max(1.0);
+                let frames_i = s.active_total_frames();
+                let frames = frames_i as f32;
                 let cur_f = ((s.current_time / dur) * frames).round() as i32;
-                let next_f = (cur_f + delta).clamp(0, frames as i32);
-                s.current_time = (next_f as f32 / frames) * dur;
-                s.ensure_playhead_in_view();
+                let next_f = (cur_f + delta).clamp(0, frames_i);
+                s.current_time = (next_f as f32 / frames.max(1.0)) * dur;
+                let lane_w = lane_w_logical(&w);
+                s.ensure_playhead_in_view(lane_w);
                 s.dirty.main_viewport = true;
                 s.dirty.transform_readout = true;
                 s.dirty.timeline_meta = true;
@@ -1830,7 +1978,8 @@ pub fn wire_ui_and_gpu(
                 };
                 if let Some(nt) = target_t {
                     s.current_time = nt;
-                    s.ensure_playhead_in_view();
+                    let lane_w = lane_w_logical(&w);
+                    s.ensure_playhead_in_view(lane_w);
                     s.dirty.main_viewport = true;
                     s.dirty.transform_readout = true;
                     s.dirty.timeline_meta = true;
@@ -1851,9 +2000,9 @@ pub fn wire_ui_and_gpu(
                 s.playing = false;
                 s.drag_kf_undo_pending = true;
                 let visible_bones: &[usize] = if s.show_all_bones {
-                    &[0, 1, 2, 3, 4, 5, 6, 7]
+                    &DISPLAY_BONE_ORDER
                 } else {
-                    &[3, 4, 5, 1]
+                    &[8, 3, 4, 5]
                 };
                 let prev_time = s.current_time;
                 let prev_bone = s.active_bone_idx;
@@ -1909,14 +2058,21 @@ pub fn wire_ui_and_gpu(
                 }
                 s.playing = false;
                 let dur = s.active_clip().duration.max(0.05);
-                let frames = (dur * 60.0).round().max(1.0);
-                let norm = (s.timeline_view_start + new_frac.clamp(0.0, 1.0) * s.timeline_view_span()).clamp(0.0, 1.0);
-                let f_idx = (norm * frames).round().clamp(0.0, frames);
-                let frame_step = dur / frames;
+                let fps = s.timeline_fps.max(1) as f32;
+                let frames = s.active_total_frames() as f32;
+                let lane_w = lane_w_logical(&w);
+                let vis_f = s.timeline_visible_frames(lane_w);
+                let frame_pos = s.timeline_scroll_frame + new_frac.clamp(0.0, 1.0) * vis_f;
+                let f_idx = frame_pos.round().clamp(0.0, frames);
+                let frame_step = dur / frames.max(1.0);
                 let min_t = if ki == 0 { 0.0 } else { s.active_clip().keyframes[ki - 1].time + frame_step * 0.5 };
                 let max_t = if ki + 1 == n { dur } else { s.active_clip().keyframes[ki + 1].time - frame_step * 0.5 };
-                let snapped = (f_idx / frames) * dur;
-                let final_t = crate::model::snap_time_to_frame(snapped.clamp(min_t.min(max_t), max_t.max(min_t)), dur);
+                let snapped = (f_idx / frames.max(1.0)) * dur;
+                let final_t = crate::model::snap_time_to_fps(
+                    snapped.clamp(min_t.min(max_t), max_t.max(min_t)),
+                    dur,
+                    fps,
+                );
                 let old_t = s.active_clip().keyframes[ki].time;
                 let clip = s.active_clip_mut();
                 clip.keyframes[ki].time = final_t;
@@ -2302,9 +2458,9 @@ pub fn wire_ui_and_gpu(
                 let tr = s.active_clip_mut().keyframes[ki].bones.bone_mut(b_idx);
                 let ax = axis.clamp(0, 2) as usize;
                 match chan {
-                    0 => tr.pos[ax] = (tr.pos[ax] + delta * 0.25).clamp(-24.0, 24.0),
-                    1 => tr.rot[ax] = (tr.rot[ax] + delta * 3.0).clamp(-180.0, 180.0),
-                    _ => tr.scale[ax] = (tr.scale[ax] + delta * 0.05).clamp(0.1, 3.0),
+                    0 => tr.pos[ax] = (tr.pos[ax] + delta * 0.25).clamp(-64.0, 64.0),
+                    1 => tr.rot[ax] = (tr.rot[ax] + delta * 3.0).clamp(-720.0, 720.0),
+                    _ => tr.scale[ax] = (tr.scale[ax] + delta * 0.05).clamp(0.10, 4.0),
                 }
                 s.note_interaction();
                 s.mark_active_clip_modified();
@@ -2335,9 +2491,9 @@ pub fn wire_ui_and_gpu(
                 let tr = s.active_clip_mut().keyframes[ki].bones.bone_mut(b_idx);
                 let ax = axis.clamp(0, 2) as usize;
                 match chan {
-                    0 => tr.pos[ax] = (tr.pos[ax] + px_dx * 0.06).clamp(-24.0, 24.0),
-                    1 => tr.rot[ax] = (tr.rot[ax] + px_dx * 0.75).clamp(-180.0, 180.0),
-                    _ => tr.scale[ax] = (tr.scale[ax] + px_dx * 0.01).clamp(0.1, 3.0),
+                    0 => tr.pos[ax] = (tr.pos[ax] + px_dx * 0.06).clamp(-64.0, 64.0),
+                    1 => tr.rot[ax] = (tr.rot[ax] + px_dx * 0.75).clamp(-720.0, 720.0),
+                    _ => tr.scale[ax] = (tr.scale[ax] + px_dx * 0.01).clamp(0.10, 4.0),
                 }
                 s.dirty.main_viewport = true;
                 s.dirty.transform_readout = true;
@@ -2443,9 +2599,95 @@ pub fn wire_ui_and_gpu(
         win.on_set_clip_frames(move |target_frames| {
             if let Some(w) = w_weak2.upgrade() {
                 let mut s = st2.borrow_mut();
-                let clamped = target_frames.clamp(6, 180);
-                rescale_clip(&mut s, clamped as f32 / 60.0);
+                let clamped = target_frames.clamp(4, 180);
+                s.set_clip_frames_preserve_timing(clamped);
+                let lane_w = lane_w_logical(&w);
+                s.ensure_playhead_in_view(lane_w);
                 sync_dirty_ui(&mut s, &w);
+                w.window().request_redraw();
+            }
+        });
+
+        let st_fps = state.clone();
+        let w_fps = win.as_weak();
+        win.on_set_timeline_fps(move |fps| {
+            if let Some(w) = w_fps.upgrade() {
+                let mut s = st_fps.borrow_mut();
+                let valid = match fps {
+                    20 | 30 | 60 => fps,
+                    _ => 20,
+                };
+                if s.timeline_fps != valid {
+                    s.push_undo();
+                    s.timeline_fps = valid;
+                    s.profile.timeline_fps = valid;
+                    s.profile_dirty = true;
+                    crate::model::snap_clip_to_fps(s.active_clip_mut(), valid as f32);
+                    s.timeline_scroll_frame = 0.0;
+                    s.dirty.main_viewport = true;
+                    s.dirty.inspector = true;
+                    s.dirty.timeline_meta = true;
+                    s.dirty.timeline_tracks = true;
+                    s.dirty.timeline_diamonds = true;
+                    s.update_exact_kf_dirty();
+                    sync_dirty_ui(&mut s, &w);
+                    show_toast(&mut s, &w, format!("Grilla ajustada a {valid} FPS"));
+                    w.window().request_redraw();
+                }
+            }
+        });
+
+        let st_pk = state.clone();
+        let w_pk = win.as_weak();
+        win.on_pack_keyframes_action(move || {
+            if let Some(w) = w_pk.upgrade() {
+                let mut s = st_pk.borrow_mut();
+                let bone_only = s.timeline_bone_scope;
+                let moved = s.pack_or_spread_keyframes(true, bone_only);
+                sync_dirty_ui(&mut s, &w);
+                let msg = if moved > 0 {
+                    format!("Frames juntados ({moved} movidos)")
+                } else {
+                    "Los frames ya están juntos al mínimo (1f)".into()
+                };
+                show_toast(&mut s, &w, msg);
+                w.window().request_redraw();
+            }
+        });
+
+        let st_sp = state.clone();
+        let w_sp = win.as_weak();
+        win.on_spread_keyframes_action(move || {
+            if let Some(w) = w_sp.upgrade() {
+                let mut s = st_sp.borrow_mut();
+                let bone_only = s.timeline_bone_scope;
+                let moved = s.pack_or_spread_keyframes(false, bone_only);
+                sync_dirty_ui(&mut s, &w);
+                let msg = if moved > 0 {
+                    format!("Frames separados (+1f, {moved} movidos)")
+                } else {
+                    "Sin espacio suficiente: aumenta duración (+f) para separar más".into()
+                };
+                show_toast(&mut s, &w, msg);
+                w.window().request_redraw();
+            }
+        });
+
+        let st_ng = state.clone();
+        let w_ng = win.as_weak();
+        win.on_nudge_keyframes_action(move |delta| {
+            if let Some(w) = w_ng.upgrade() {
+                let mut s = st_ng.borrow_mut();
+                let bone_only = s.timeline_bone_scope;
+                let moved = s.nudge_keyframes(delta, bone_only);
+                sync_dirty_ui(&mut s, &w);
+                let dir_lbl = if delta < 0 { "-1f" } else { "+1f" };
+                let msg = if moved > 0 {
+                    format!("Timing movido {dir_lbl} ({moved} frames)")
+                } else {
+                    format!("No hay margen para mover {dir_lbl}")
+                };
+                show_toast(&mut s, &w, msg);
                 w.window().request_redraw();
             }
         });
@@ -2637,6 +2879,17 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
+        win.on_toggle_gallery_group(move |gi| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.toggle_gallery_group(gi);
+                sync_dirty_ui(&mut s, &w);
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
         win.on_filter_gallery(move |fi| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
@@ -2669,7 +2922,7 @@ pub fn wire_ui_and_gpu(
                     s.current_time = 0.0;
                     s.playing = false;
                     s.timeline_zoom = 1.0;
-                    s.timeline_view_start = 0.0;
+                    s.timeline_scroll_frame = 0.0;
                     s.last_exact_kf = None;
                     s.clear_bone_selection();
                     s.dirty.main_viewport = true;
@@ -2709,7 +2962,7 @@ pub fn wire_ui_and_gpu(
                     s.active_clip_idx = s.project.clips.len() - 1;
                     s.current_time = 0.0;
                     s.timeline_zoom = 1.0;
-                    s.timeline_view_start = 0.0;
+                    s.timeline_scroll_frame = 0.0;
                     s.clear_bone_selection();
                     s.gallery_thumbs.clear();
                     s.dirty.main_viewport = true;
@@ -2742,7 +2995,7 @@ pub fn wire_ui_and_gpu(
                 s.current_time = 0.0;
                 s.playing = false;
                 s.timeline_zoom = 1.0;
-                s.timeline_view_start = 0.0;
+                s.timeline_scroll_frame = 0.0;
                 s.clear_bone_selection();
                 s.gallery_thumbs.clear();
                 s.mark_active_clip_modified();
@@ -2826,11 +3079,13 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
-        win.on_studio_key(move |tag, ctrl, shift, _alt| {
+        win.on_studio_key(move |tag, ctrl, shift, alt| {
             let Some(w) = w_weak.upgrade() else { return };
             let low = tag.to_ascii_lowercase();
             match low.as_str() {
                 "space" => w.invoke_toggle_play(),
+                "left" if alt => w.invoke_nudge_keyframes_action(-1),
+                "right" if alt => w.invoke_nudge_keyframes_action(1),
                 "left" if shift => w.invoke_jump_kf(-1),
                 "right" if shift => w.invoke_jump_kf(1),
                 "left" | "," => w.invoke_step_frame(-1),
@@ -2850,10 +3105,11 @@ pub fn wire_ui_and_gpu(
                 "c" if ctrl => w.invoke_copy_timeline_action(),
                 "v" if ctrl => w.invoke_paste_timeline_action(),
                 "1" => { w.set_active_tool(0); w.invoke_select_tool(0); }
-                "2" => { w.set_active_tool(1); w.invoke_select_tool(1); }
-                "3" => { w.set_active_tool(2); w.invoke_select_tool(2); }
+                "2" | "t" => { w.set_active_tool(1); w.invoke_select_tool(1); }
+                "3" | "x" => { w.set_active_tool(2); w.invoke_select_tool(2); }
                 "4" => { w.set_active_tool(3); w.invoke_select_tool(3); }
-                "5" => { w.set_active_tool(4); w.invoke_select_tool(4); }
+                "5" | "g" => { w.set_active_tool(4); w.invoke_select_tool(4); }
+                "l" => w.invoke_toggle_gizmo_space(),
                 "w" => { st.borrow_mut().held_nav_keys[0] = true; w.window().request_redraw(); }
                 "s" => { st.borrow_mut().held_nav_keys[1] = true; w.window().request_redraw(); }
                 "a" => { st.borrow_mut().held_nav_keys[2] = true; w.window().request_redraw(); }
@@ -3448,7 +3704,7 @@ pub fn wire_ui_and_gpu(
                             s.current_time = 0.0;
                             s.playing = false;
                             s.timeline_zoom = 1.0;
-                            s.timeline_view_start = 0.0;
+                            s.timeline_scroll_frame = 0.0;
                             s.last_exact_kf = None;
                             s.clear_bone_selection();
                             s.dirty.main_viewport = true;
@@ -3547,12 +3803,108 @@ pub fn wire_ui_and_gpu(
     {
         let st = state.clone();
         let w_weak = win.as_weak();
+        win.on_toggle_gizmo_space(move || {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.gizmo_world_space = !s.gizmo_world_space;
+                let msg = if s.gizmo_world_space {
+                    "Espacio del Gizmo: Mundo (ejes fijos)"
+                } else {
+                    "Espacio del Gizmo: Local (ejes del hueso)"
+                };
+                s.dirty.main_viewport = true;
+                s.dirty.inspector = true;
+                sync_dirty_ui(&mut s, &w);
+                show_toast(&mut s, &w, msg.into());
+                w.window().request_redraw();
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_toggle_offhand_weapon(move |on| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.show_offhand_weapon = on;
+                s.dirty.main_viewport = true;
+                s.dirty.inspector = true;
+                sync_dirty_ui(&mut s, &w);
+                w.window().request_redraw();
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
         win.on_rename_clip(move |name| {
             if let Some(w) = w_weak.upgrade() {
                 let mut s = st.borrow_mut();
                 if s.rename_active_clip(name.as_str()) {
                     sync_dirty_ui(&mut s, &w);
                 }
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_load_skin_action(move || {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Seleccionar skin de Minecraft (.png)")
+                .add_filter("Minecraft Skin PNG", &["png"])
+                .pick_file()
+            {
+                if let Some(w) = w_weak.upgrade() {
+                    let mut s = st.borrow_mut();
+                    match s.load_skin_from_path(&path) {
+                        Ok(msg) => {
+                            sync_dirty_ui(&mut s, &w);
+                            show_toast(&mut s, &w, msg);
+                            w.window().request_redraw();
+                        }
+                        Err(err) => {
+                            show_toast(&mut s, &w, err);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_reset_skin_action(move || {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.clear_custom_skin();
+                sync_dirty_ui(&mut s, &w);
+                show_toast(&mut s, &w, "Skin restablecida al modelo base".into());
+                w.window().request_redraw();
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_toggle_skin_slim(move |on| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.set_skin_slim(on);
+                sync_dirty_ui(&mut s, &w);
+                w.window().request_redraw();
+            }
+        });
+    }
+    {
+        let st = state.clone();
+        let w_weak = win.as_weak();
+        win.on_toggle_skin_outer_layer(move |on| {
+            if let Some(w) = w_weak.upgrade() {
+                let mut s = st.borrow_mut();
+                s.set_skin_outer_layer(on);
+                sync_dirty_ui(&mut s, &w);
+                w.window().request_redraw();
             }
         });
     }

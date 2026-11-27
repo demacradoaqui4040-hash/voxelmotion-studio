@@ -71,10 +71,17 @@ fn bake_clip_json(clip: &ClipDef, optimize: bool, geckolib: bool, include_events
             .iter()
             .map(|(t, p)| (*t, p.get(bone).map(|x| x.pos).unwrap_or([0.0; 3])))
             .collect();
+        let scl_raw: Vec<(f32, [f32; 3])> = sampled
+            .iter()
+            .map(|(t, p)| (*t, p.get(bone).map(|x| x.scale).unwrap_or([1.0; 3])))
+            .collect();
 
         let has_rot = rot_raw.iter().any(|(_, v)| v.iter().any(|x| x.abs() > 0.05));
         let has_pos = pos_raw.iter().any(|(_, v)| v.iter().any(|x| x.abs() > 0.02));
-        if !has_rot && !has_pos {
+        let has_scl = scl_raw
+            .iter()
+            .any(|(_, v)| v.iter().any(|x| (*x - 1.0).abs() > 0.015));
+        if !has_rot && !has_pos && !has_scl {
             continue;
         }
 
@@ -94,6 +101,14 @@ fn bake_clip_json(clip: &ClipDef, optimize: bool, geckolib: bool, include_events
                 m.insert(format_ts(t), json!([round2(v[0]), round2(v[1]), round2(v[2])]));
             }
             bone_obj.insert("position".into(), Value::Object(m));
+        }
+        if has_scl {
+            let pts = if optimize { optimize_track_points(&scl_raw, 0.015) } else { scl_raw };
+            let mut m = Map::new();
+            for (t, v) in pts {
+                m.insert(format_ts(t), json!([round2(v[0]), round2(v[1]), round2(v[2])]));
+            }
+            bone_obj.insert("scale".into(), Value::Object(m));
         }
         bones_map.insert(bone.to_string(), Value::Object(bone_obj));
     }

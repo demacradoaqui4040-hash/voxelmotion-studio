@@ -3,21 +3,27 @@
 use crate::camera::ViewportCameraController;
 use crate::catalog;
 use crate::exporter::load_saved_project;
-use crate::math3d::{evaluate_rig_matrices, gizmo_axes_world, GizmoAxis, Mat4, Vec3};
+use crate::math3d::{
+    bone_parent_world_matrix, evaluate_rig_matrices, gizmo_axes_for_space, matrix_axes_world,
+    GizmoAxis, Mat4, Vec3,
+};
 use crate::model::{
-    build_demo_presets, create_blank_clip, sample_clip_pose, snap_clip_to_frame_grid,
-    snap_time_to_frame, AnimatorProject, BoneTransform, ClipDef, ClipSource, CurationStatus,
-    EasingMode, GalleryGroup, Keyframe, RigPose, SpritePixels, ToolMode, VfxKind, WeaponCategory,
-    WeaponRecord, ALL_BONES_MASK, BONE_COUNT,
+    build_demo_presets, create_blank_clip, sample_clip_pose, snap_clip_to_fps, snap_time_to_fps,
+    AnimatorProject, BoneTransform, ClipDef, ClipSource, CurationStatus, EasingMode, GalleryGroup,
+    Keyframe, RigPose, SpritePixels, ToolMode, VfxKind, WeaponCategory, WeaponRecord,
+    ALL_BONES_MASK, BONE_COUNT,
 };
 use crate::modpack::{
     discover_servernuevo_root, load_all_combat_animations, load_curated_weapons, load_local_profile,
     save_local_profile, LocalProfile,
 };
 use crate::renderer3d::{CameraState, GpuRenderer, RenderParams};
+use crate::voxelizer::{
+    build_character_bone_meshes_with_slim, build_skin_character_meshes, detect_skin_slim_heuristic,
+};
 use slint::{Color, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const MAX_UNDO_STEPS: usize = 50;
@@ -133,12 +139,15 @@ pub struct AppState {
     pub gallery_status_filter: i32,
     pub gallery_compat_only: bool,
     pub gallery_search: String,
+    pub collapsed_gallery_groups: [bool; 5],
 
     pub current_time: f32,
     pub playing: bool,
     pub speed: f32,
     pub tool_mode: ToolMode,
     pub show_gizmo: bool,
+    pub gizmo_world_space: bool,
+    pub show_offhand_weapon: bool,
     pub solo_weapon: bool,
     pub shadows: bool,
     pub onion: bool,
@@ -147,8 +156,9 @@ pub struct AppState {
     pub auto_keyframe: bool,
     pub show_all_bones: bool,
     pub timeline_bone_scope: bool,
+    pub timeline_fps: i32,
     pub timeline_zoom: f32,
-    pub timeline_view_start: f32,
+    pub timeline_scroll_frame: f32,
     pub hidden_bones: [bool; BONE_COUNT],
     pub hovered_gizmo: GizmoAxis,
 
@@ -167,6 +177,10 @@ pub struct AppState {
     pub card_img: Option<Image>,
     pub gallery_thumbs: HashMap<String, Image>,
     pub thumb_lru: VecDeque<String>,
+    pub skin_pixels: Option<(u32, u32, Vec<u8>)>,
+    pub skin_name: String,
+    pub skin_slim: bool,
+    pub skin_outer_layer: bool,
     pub theme_idx: i32,
     pub ui_motion_enabled: bool,
     pub gpu_low_power: bool,
@@ -233,14 +247,31 @@ pub fn sprite_to_slint_image(sprite: &SpritePixels) -> Image {
 
 pub fn bone_color(idx: usize) -> Color {
     match idx {
+        8 => Color::from_rgb_u8(56, 189, 248),  // Raíz
         3 => Color::from_rgb_u8(96, 165, 250),  // BrazoDerecho
         4 => Color::from_rgb_u8(167, 139, 250), // BrazoIzquierdo
         5 => Color::from_rgb_u8(251, 191, 36),  // Espada
+        9 => Color::from_rgb_u8(245, 158, 11),  // ArmaIzq
         1 => Color::from_rgb_u8(52, 211, 153),  // Cuerpo
         2 => Color::from_rgb_u8(244, 114, 182), // Cabeza
         0 => Color::from_rgb_u8(148, 163, 184), // Cintura
         _ => Color::from_rgb_u8(129, 140, 248), // Legs
     }
+}
+
+/// Decode any Minecraft `.png` skin (64x64, 64x32 legacy, or square HD skin) to raw RGBA pixels.
+pub fn decode_skin_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+    let img = image::open(path).map_err(|e| format!("No se pudo abrir la skin PNG: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let valid_square = w == h && w >= 32;
+    let valid_legacy = w == h.saturating_mul(2) && w >= 64;
+    if !valid_square && !valid_legacy {
+        return Err(format!(
+            "Formato no compatible ({w}x{h}). Usá una skin de Minecraft 64x64, 64x32 o HD cuadrada."
+        ));
+    }
+    Ok((w, h, rgba.into_raw()))
 }
 
 impl AppState {
@@ -277,7 +308,15 @@ impl AppState {
             (ws, raw_cnt, proj)
         };
         for c in &mut project.clips {
-            snap_clip_to_frame_grid(c);
+            let dur = c.duration.max(0.05);
+            let startup_fps = if c.keyframes.len() <= ((dur * 20.0).round() as usize + 1) {
+                20.0
+            } else if c.keyframes.len() <= ((dur * 30.0).round() as usize + 1) {
+                30.0
+            } else {
+                60.0
+            };
+            snap_clip_to_fps(c, startup_fps);
         }
 
         let weapon_icons = weapons
@@ -301,6 +340,28 @@ impl AppState {
         let theme_idx = profile.theme_idx.clamp(0, 4);
         let ui_motion_enabled = profile.ui_motion_enabled;
         let gpu_low_power = profile.gpu_low_power;
+        let timeline_fps = match profile.timeline_fps {
+            20 | 30 | 60 => profile.timeline_fps,
+            _ => 20,
+        };
+        let skin_slim = profile.skin_slim;
+        let skin_outer_layer = profile.skin_outer_layer;
+        let (skin_pixels, skin_name) = if let Some(ref sp) = profile.skin_path {
+            let p = Path::new(sp);
+            match decode_skin_png(p) {
+                Ok(px) => {
+                    let name = p
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Skin")
+                        .to_string();
+                    (Some(px), name)
+                }
+                Err(_) => (None, String::new()),
+            }
+        } else {
+            (None, String::new())
+        };
 
         Self {
             workspace_root,
@@ -324,11 +385,14 @@ impl AppState {
             gallery_status_filter: 0,
             gallery_compat_only: false,
             gallery_search: String::new(),
+            collapsed_gallery_groups: [false; 5],
             current_time: 0.0,
             playing: false,
             speed: 1.0,
             tool_mode: ToolMode::Rotate,
             show_gizmo: true,
+            gizmo_world_space: true,
+            show_offhand_weapon: false,
             solo_weapon: false,
             shadows: true,
             onion: true,
@@ -337,8 +401,9 @@ impl AppState {
             auto_keyframe: true,
             show_all_bones: false,
             timeline_bone_scope: true,
+            timeline_fps,
             timeline_zoom: 1.0,
-            timeline_view_start: 0.0,
+            timeline_scroll_frame: 0.0,
             hidden_bones: [false; BONE_COUNT],
             hovered_gizmo: GizmoAxis::None,
             main_cam: ViewportCameraController::new_main(),
@@ -354,6 +419,10 @@ impl AppState {
             card_img: None,
             gallery_thumbs: HashMap::new(),
             thumb_lru: VecDeque::new(),
+            skin_pixels,
+            skin_name,
+            skin_slim,
+            skin_outer_layer,
             theme_idx,
             ui_motion_enabled,
             gpu_low_power,
@@ -437,52 +506,103 @@ impl AppState {
         self.redo_stack.clear();
     }
 
-    pub fn timeline_view_span(&self) -> f32 {
-        (1.0 / self.timeline_zoom.clamp(1.0, 8.0)).clamp(0.125, 1.0)
+    pub fn active_total_frames(&self) -> i32 {
+        let fps = self.timeline_fps.max(1) as f32;
+        (self.active_clip().duration.max(0.05) * fps).round().max(1.0) as i32
     }
 
-    pub fn set_timeline_zoom(&mut self, next_zoom: f32, anchor_screen_frac: f32) {
-        let old_span = self.timeline_view_span();
+    pub fn timeline_px_per_frame(&self) -> f32 {
+        (28.0 * self.timeline_zoom.clamp(0.35, 4.0)).clamp(9.0, 120.0)
+    }
+
+    pub fn timeline_visible_frames(&self, lane_w_logical: f32) -> f32 {
+        (lane_w_logical.max(320.0) / self.timeline_px_per_frame()).max(4.0)
+    }
+
+    pub fn max_scroll_frame(&self, lane_w_logical: f32) -> f32 {
+        let vis = self.timeline_visible_frames(lane_w_logical);
+        let total = self.active_total_frames() as f32;
+        (total - vis + 2.0).max(0.0)
+    }
+
+    pub fn set_timeline_zoom_at(
+        &mut self,
+        next_zoom: f32,
+        anchor_screen_frac: f32,
+        lane_w_logical: f32,
+    ) {
+        let old_vis = self.timeline_visible_frames(lane_w_logical);
         let anchor_s = anchor_screen_frac.clamp(0.0, 1.0);
-        let anchor_norm = (self.timeline_view_start + anchor_s * old_span).clamp(0.0, 1.0);
-        self.timeline_zoom = next_zoom.clamp(1.0, 8.0);
-        let new_span = self.timeline_view_span();
-        let max_start = (1.0 - new_span).max(0.0);
-        self.timeline_view_start = (anchor_norm - anchor_s * new_span).clamp(0.0, max_start);
+        let anchor_frame = (self.timeline_scroll_frame + anchor_s * old_vis).max(0.0);
+        self.timeline_zoom = next_zoom.clamp(0.35, 4.0);
+        let new_vis = self.timeline_visible_frames(lane_w_logical);
+        let max_scroll = self.max_scroll_frame(lane_w_logical);
+        self.timeline_scroll_frame = (anchor_frame - anchor_s * new_vis).clamp(0.0, max_scroll);
         self.dirty.timeline_meta = true;
         self.dirty.timeline_tracks = true;
         self.dirty.timeline_diamonds = true;
     }
 
-    pub fn pan_timeline_view(&mut self, delta_screen_frac: f32) {
-        let span = self.timeline_view_span();
-        let max_start = (1.0 - span).max(0.0);
-        self.timeline_view_start =
-            (self.timeline_view_start + delta_screen_frac * span).clamp(0.0, max_start);
+    pub fn pan_timeline_frames(&mut self, delta_screen_frac: f32, lane_w_logical: f32) {
+        let vis = self.timeline_visible_frames(lane_w_logical);
+        let max_scroll = self.max_scroll_frame(lane_w_logical);
+        self.timeline_scroll_frame =
+            (self.timeline_scroll_frame + delta_screen_frac * vis).clamp(0.0, max_scroll);
         self.dirty.timeline_meta = true;
         self.dirty.timeline_tracks = true;
         self.dirty.timeline_diamonds = true;
     }
 
-    pub fn ensure_playhead_in_view(&mut self) {
-        if self.timeline_zoom <= 1.01 {
+    pub fn ensure_playhead_in_view(&mut self, lane_w_logical: f32) {
+        let vis = self.timeline_visible_frames(lane_w_logical);
+        let max_scroll = self.max_scroll_frame(lane_w_logical);
+        if max_scroll <= 0.01 && self.timeline_scroll_frame <= 0.01 {
             return;
         }
         let dur = self.active_clip().duration.max(0.05);
-        let p = (self.current_time / dur).clamp(0.0, 1.0);
-        let span = self.timeline_view_span();
-        let max_start = (1.0 - span).max(0.0);
-        if p < self.timeline_view_start {
-            self.timeline_view_start = (p - span * 0.1).clamp(0.0, max_start);
+        let p_frame = (self.current_time / dur).clamp(0.0, 1.0) * self.active_total_frames() as f32;
+        if p_frame < self.timeline_scroll_frame {
+            self.timeline_scroll_frame = (p_frame - vis * 0.1).clamp(0.0, max_scroll);
             self.dirty.timeline_meta = true;
             self.dirty.timeline_tracks = true;
             self.dirty.timeline_diamonds = true;
-        } else if p > self.timeline_view_start + span {
-            self.timeline_view_start = (p - span * 0.9).clamp(0.0, max_start);
+        } else if p_frame > self.timeline_scroll_frame + vis {
+            self.timeline_scroll_frame = (p_frame - vis * 0.88).clamp(0.0, max_scroll);
             self.dirty.timeline_meta = true;
             self.dirty.timeline_tracks = true;
             self.dirty.timeline_diamonds = true;
         }
+    }
+
+    /// Extend or trim clip duration cleanly without stretching/deforming existing keyframe timings.
+    pub fn set_clip_frames_preserve_timing(&mut self, target_frames: i32) {
+        let fps = self.timeline_fps.max(1) as f32;
+        let clamped = target_frames.clamp(4, 300);
+        let next_d = clamped as f32 / fps;
+        self.push_undo();
+        {
+            let clip = self.active_clip_mut();
+            clip.duration = next_d;
+            for k in &mut clip.keyframes {
+                if k.time > next_d {
+                    k.time = next_d;
+                }
+            }
+            if let Some(imp) = clip.impact_time {
+                if imp > next_d {
+                    clip.impact_time = Some(snap_time_to_fps(next_d, next_d, fps));
+                }
+            }
+            snap_clip_to_fps(clip, fps);
+        }
+        self.current_time = snap_time_to_fps(self.current_time.clamp(0.0, next_d), next_d, fps);
+        self.clear_bone_selection();
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
     }
 
     pub fn clear_bone_selection(&mut self) {
@@ -492,10 +612,11 @@ impl AppState {
 
     pub fn ensure_bone_kf_at(&mut self, time: f32, bone_idx: usize, easing: EasingMode) -> usize {
         let b_idx = bone_idx.min(BONE_COUNT - 1);
+        let fps = self.timeline_fps.max(1) as f32;
         let dur = self.active_clip().duration.max(0.05);
-        let frames = (dur * 60.0).round().max(1.0);
+        let frames = (dur * fps).round().max(1.0);
         let tol = (0.45 * (dur / frames)).min(0.014);
-        let target_t = snap_time_to_frame(time, dur);
+        let target_t = snap_time_to_fps(time, dur, fps);
         let sampled_pose = sample_clip_pose(self.active_clip(), target_t);
         let clip = self.active_clip_mut();
         for (i, k) in clip.keyframes.iter_mut().enumerate() {
@@ -511,7 +632,7 @@ impl AppState {
             time: target_t,
             easing,
             bones: sampled_pose,
-            bone_mask: 1u8 << b_idx,
+            bone_mask: 1u16 << b_idx,
         });
         clip.keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
         let idx = clip
@@ -524,10 +645,11 @@ impl AppState {
     }
 
     pub fn ensure_kf_at_current(&mut self) -> usize {
+        let fps = self.timeline_fps.max(1) as f32;
         let dur = self.active_clip().duration.max(0.05);
-        let frames = (dur * 60.0).round().max(1.0);
+        let frames = (dur * fps).round().max(1.0);
         let tol = (0.45 * (dur / frames)).min(0.014);
-        let cur_t = snap_time_to_frame(self.current_time, dur);
+        let cur_t = snap_time_to_fps(self.current_time, dur, fps);
         let pose = sample_clip_pose(self.active_clip(), cur_t);
         let clip = self.active_clip_mut();
         for (i, k) in clip.keyframes.iter_mut().enumerate() {
@@ -692,8 +814,9 @@ impl AppState {
         };
         let mut first_dst: Option<f32> = None;
         let mut last_dst: Option<f32> = None;
+        let fps = self.timeline_fps.max(1) as f32;
         for f in &cb.frames {
-            let dst_t = snap_time_to_frame(base_t + f.dt, dur);
+            let dst_t = snap_time_to_fps(base_t + f.dt, dur, fps);
             let mut tr = f.transform;
             if mirror_lr {
                 tr.pos[0] = -tr.pos[0];
@@ -783,9 +906,10 @@ impl AppState {
     pub fn duplicate_bone_frame_next(&mut self, bone_idx: usize) -> f32 {
         let b_idx = bone_idx.min(BONE_COUNT - 1);
         self.push_undo();
+        let fps = self.timeline_fps.max(1) as f32;
         let dur = self.active_clip().duration.max(0.1);
         let tr = sample_clip_pose(self.active_clip(), self.current_time).0[b_idx];
-        let rounded = snap_time_to_frame(self.current_time + 0.10, dur);
+        let rounded = snap_time_to_fps(self.current_time + (1.0 / fps), dur, fps);
         let ki = self.ensure_bone_kf_at(rounded, b_idx, EasingMode::EaseOut);
         self.active_clip_mut().keyframes[ki].bones.0[b_idx] = tr;
         self.current_time = rounded;
@@ -798,14 +922,252 @@ impl AppState {
         rounded
     }
 
+    /// Re-index matched bone keyframes to target frame numbers without disturbing other bones.
+    fn apply_reindexed_bone_frames(
+        &mut self,
+        b_idx: usize,
+        matched: &[usize],
+        new_frames: &[i32],
+        total_f: i32,
+        dur: f32,
+    ) {
+        let saved: Vec<(i32, EasingMode, BoneTransform)> = matched
+            .iter()
+            .zip(new_frames.iter())
+            .map(|(&kf_i, &nf)| {
+                let kf = &self.active_clip().keyframes[kf_i];
+                (nf.clamp(0, total_f), kf.easing, kf.bones.0[b_idx])
+            })
+            .collect();
+        {
+            let clip = self.active_clip_mut();
+            for &kf_i in matched {
+                if let Some(kf) = clip.keyframes.get_mut(kf_i) {
+                    kf.set_bone(b_idx, false);
+                    kf.bones.0[b_idx] = BoneTransform::IDENTITY;
+                }
+            }
+        }
+        for (nf, ease, tr) in &saved {
+            let dst_t = (*nf as f32 / total_f as f32) * dur;
+            let ki = self.ensure_bone_kf_at(dst_t, b_idx, *ease);
+            let kf = &mut self.active_clip_mut().keyframes[ki];
+            kf.bones.0[b_idx] = *tr;
+            kf.easing = *ease;
+            kf.set_bone(b_idx, true);
+        }
+        let clip = self.active_clip_mut();
+        let mut idx = clip.keyframes.len();
+        while idx > 0 && clip.keyframes.len() > 2 {
+            idx -= 1;
+            if clip.keyframes[idx].bone_mask == 0 {
+                clip.keyframes.remove(idx);
+            }
+        }
+    }
+
+    /// Pack consecutive keyframe gaps tighter (`compact == true`) or spread them apart (`compact == false`),
+    /// targeting either the Shift-selected range, active bone track (`bone_only`), or full-body clip.
+    pub fn pack_or_spread_keyframes(&mut self, compact: bool, bone_only: bool) -> usize {
+        let fps = self.timeline_fps.max(1) as f32;
+        let b_idx = self.active_bone_idx.min(BONE_COUNT - 1);
+        let mut dur = self.active_clip().duration.max(0.05);
+        let mut total_f = (dur * fps).round().max(1.0) as i32;
+        let tol = (0.45 * (dur / total_f as f32)).min(0.016);
+        let has_range = self.selected_range_times.is_some()
+            && (!bone_only || self.selected_range_bone == Some(b_idx));
+
+        let matched: Vec<usize> = self
+            .active_clip()
+            .keyframes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| {
+                if bone_only && !k.has_bone(b_idx) {
+                    return None;
+                }
+                if has_range {
+                    let (t0, t1) = self.selected_range_times.unwrap();
+                    let (lo, hi) = (t0.min(t1), t0.max(t1));
+                    (k.time >= lo - tol && k.time <= hi + tol).then_some(i)
+                } else {
+                    Some(i)
+                }
+            })
+            .collect();
+        if matched.len() < 2 {
+            return 0;
+        }
+
+        let old_frames: Vec<i32> = matched
+            .iter()
+            .map(|&i| {
+                let kt = self.active_clip().keyframes[i].time;
+                ((kt / dur).clamp(0.0, 1.0) * total_f as f32).round() as i32
+            })
+            .collect();
+
+        let mut new_frames = Vec::with_capacity(old_frames.len());
+        new_frames.push(old_frames[0]);
+        for k in 1..old_frames.len() {
+            let gap = (old_frames[k] - old_frames[k - 1]).max(1);
+            let next_gap = if compact {
+                if gap <= 1 {
+                    1
+                } else if gap <= 3 {
+                    gap - 1
+                } else {
+                    ((gap as f32) * 0.72).floor().max(1.0) as i32
+                }
+            } else {
+                gap + 1
+            };
+            new_frames.push(new_frames[k - 1] + next_gap);
+        }
+
+        if new_frames == old_frames {
+            return 0;
+        }
+        self.push_undo();
+
+        let max_new_f = *new_frames.last().unwrap_or(&total_f);
+        if max_new_f > total_f {
+            total_f = max_new_f.min(300);
+            dur = total_f as f32 / fps;
+            self.active_clip_mut().duration = dur;
+        }
+
+        if !bone_only {
+            let clip = self.active_clip_mut();
+            for (mi, &kf_i) in matched.iter().enumerate() {
+                if let Some(kf) = clip.keyframes.get_mut(kf_i) {
+                    kf.time = (new_frames[mi].clamp(0, total_f) as f32 / total_f as f32) * dur;
+                }
+            }
+            snap_clip_to_fps(clip, fps);
+        } else {
+            self.apply_reindexed_bone_frames(b_idx, &matched, &new_frames, total_f, dur);
+        }
+
+        if has_range {
+            let t_a = (new_frames[0].clamp(0, total_f) as f32 / total_f as f32) * dur;
+            let t_b = (*new_frames.last().unwrap_or(&total_f).clamp(&0, &total_f) as f32
+                / total_f as f32)
+                * dur;
+            self.selected_range_times = Some((t_a, t_b));
+        }
+        self.current_time = self.current_time.clamp(0.0, dur);
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        matched.len()
+    }
+
+    /// Shift selected keyframe(s) (or keyframe under playhead) by `delta_frames` (`±1f`).
+    pub fn nudge_keyframes(&mut self, delta_frames: i32, bone_only: bool) -> usize {
+        if delta_frames == 0 {
+            return 0;
+        }
+        let fps = self.timeline_fps.max(1) as f32;
+        let dur = self.active_clip().duration.max(0.05);
+        let total_f = (dur * fps).round().max(1.0) as i32;
+        let b_idx = self.active_bone_idx.min(BONE_COUNT - 1);
+        let tol = (0.45 * (dur / total_f as f32)).min(0.016);
+        let has_range = self.selected_range_times.is_some()
+            && (!bone_only || self.selected_range_bone == Some(b_idx));
+
+        let cur_t = self.current_time;
+        let matched: Vec<usize> = self
+            .active_clip()
+            .keyframes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| {
+                if bone_only && !k.has_bone(b_idx) {
+                    return None;
+                }
+                if has_range {
+                    let (t0, t1) = self.selected_range_times.unwrap();
+                    let (lo, hi) = (t0.min(t1), t0.max(t1));
+                    (k.time >= lo - tol && k.time <= hi + tol).then_some(i)
+                } else {
+                    ((k.time - cur_t).abs() <= tol).then_some(i)
+                }
+            })
+            .collect();
+        if matched.is_empty() {
+            return 0;
+        }
+
+        let old_frames: Vec<i32> = matched
+            .iter()
+            .map(|&i| ((self.active_clip().keyframes[i].time / dur) * total_f as f32).round() as i32)
+            .collect();
+        let min_f = *old_frames.iter().min().unwrap_or(&0);
+        let max_f = *old_frames.iter().max().unwrap_or(&0);
+        let actual_delta = delta_frames.clamp(-min_f, total_f - max_f);
+        if actual_delta == 0 {
+            return 0;
+        }
+        let unselected_frames: Vec<i32> = self
+            .active_clip()
+            .keyframes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| {
+                if matched.contains(&i) || (bone_only && !k.has_bone(b_idx)) {
+                    None
+                } else {
+                    Some(((k.time / dur) * total_f as f32).round() as i32)
+                }
+            })
+            .collect();
+        let new_frames: Vec<i32> = old_frames.iter().map(|&f| f + actual_delta).collect();
+        if new_frames.iter().any(|nf| unselected_frames.contains(nf)) {
+            return 0;
+        }
+        self.push_undo();
+
+        if !bone_only {
+            let clip = self.active_clip_mut();
+            for (mi, &kf_i) in matched.iter().enumerate() {
+                if let Some(kf) = clip.keyframes.get_mut(kf_i) {
+                    kf.time = (new_frames[mi] as f32 / total_f as f32) * dur;
+                }
+            }
+            snap_clip_to_fps(clip, fps);
+        } else {
+            self.apply_reindexed_bone_frames(b_idx, &matched, &new_frames, total_f, dur);
+        }
+
+        if has_range {
+            let t_a = ((min_f + actual_delta) as f32 / total_f as f32) * dur;
+            let t_b = ((max_f + actual_delta) as f32 / total_f as f32) * dur;
+            self.selected_range_times = Some((t_a, t_b));
+        }
+        self.current_time =
+            snap_time_to_fps((cur_t + (actual_delta as f32 / fps)).clamp(0.0, dur), dur, fps);
+        self.mark_active_clip_modified();
+        self.dirty.main_viewport = true;
+        self.dirty.inspector = true;
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+        matched.len()
+    }
+
     pub fn focus_active_bone(&mut self) {
-        let (pivot, _, _) = self.active_gizmo_geom();
+        let (pivot, _, _, _, _) = self.active_gizmo_geom();
         // Offset toward mid-limb center when a limb is selected (arms/legs extend downward from shoulder/hip pivot)
         let center_offset = match self.active_bone_idx {
-            3 | 4 => Vec3::new(0.0, -0.22, 0.0),
+            3 | 4 | 9 => Vec3::new(0.0, -0.22, 0.0),
             6 | 7 => Vec3::new(0.0, -0.35, 0.0),
             2 => Vec3::new(0.0, 0.22, 0.0),
             1 => Vec3::new(0.0, 0.30, 0.0),
+            8 => Vec3::new(0.0, 0.65, 0.0),
             _ => Vec3::ZERO,
         };
         let p = pivot.add(center_offset);
@@ -820,7 +1182,8 @@ impl AppState {
         self.dirty.main_viewport = true;
     }
 
-    pub fn active_gizmo_geom(&self) -> (Vec3, [Vec3; 3], Mat4) {
+    /// Return `(pivot, gizmo_axes, parent_axes, bone_axes, vp)` in world space for the selected bone.
+    pub fn active_gizmo_geom(&self) -> (Vec3, [Vec3; 3], [Vec3; 3], [Vec3; 3], Mat4) {
         let aspect = (self.vp_size.0 as f32 / self.vp_size.1.max(1) as f32).max(0.5);
         let (vp, _, _) = self.main_cam.current.vp_and_inv(aspect);
         let pose = if self.is_active_clip_compatible() {
@@ -829,7 +1192,11 @@ impl AppState {
             RigPose::ZERO
         };
         let mats = evaluate_rig_matrices(&pose);
-        let bone_idx = if self.solo_weapon { 5 } else { self.active_bone_idx.min(7) };
+        let bone_idx = if self.solo_weapon {
+            5
+        } else {
+            self.active_bone_idx.min(BONE_COUNT - 1)
+        };
         let bone_m = if self.solo_weapon {
             let ri = pose.bone(5);
             Mat4::translate(0.0, 0.96, 0.55)
@@ -841,8 +1208,14 @@ impl AppState {
         } else {
             mats[bone_idx]
         };
-        let (pivot, axes) = gizmo_axes_world(bone_m, self.solo_weapon);
-        (pivot, axes, vp)
+        let (pivot, gizmo_axes) = gizmo_axes_for_space(bone_m, self.solo_weapon, self.gizmo_world_space);
+        let (_, bone_axes) = gizmo_axes_for_space(bone_m, self.solo_weapon, false);
+        let parent_axes = if self.solo_weapon {
+            bone_axes
+        } else {
+            matrix_axes_world(bone_parent_world_matrix(bone_idx, &mats))
+        };
+        (pivot, gizmo_axes, parent_axes, bone_axes, vp)
     }
 
     pub fn rebuild_weapon_filter(&mut self) {
@@ -991,6 +1364,15 @@ impl AppState {
             .collect()
     }
 
+    pub fn toggle_gallery_group(&mut self, group_idx: i32) {
+        if let Ok(idx) = usize::try_from(group_idx) {
+            if let Some(slot) = self.collapsed_gallery_groups.get_mut(idx) {
+                *slot = !*slot;
+                self.dirty.gallery = true;
+            }
+        }
+    }
+
     pub fn mark_active_clip_modified(&mut self) {
         let clip = self.active_clip().clone();
         self.profile.clip_status.insert(clip.id.clone(), clip.status);
@@ -1053,13 +1435,94 @@ impl AppState {
         }
     }
 
+    /// Upload the active character rig meshes (custom Minecraft skin or stylized base rig) to GPU.
+    pub fn sync_character_mesh_gpu(&mut self) {
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        let meshes = if let Some((w, h, ref rgba)) = self.skin_pixels {
+            build_skin_character_meshes(rgba, w, h, self.skin_slim, self.skin_outer_layer)
+        } else {
+            build_character_bone_meshes_with_slim(self.skin_slim)
+        };
+        gpu.set_character_meshes(&meshes);
+    }
+
+    pub fn load_skin_from_path(&mut self, path: &Path) -> Result<String, String> {
+        let (w, h, rgba) = decode_skin_png(path)?;
+        let auto_slim = detect_skin_slim_heuristic(&rgba, w, h);
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Skin")
+            .to_string();
+        self.skin_pixels = Some((w, h, rgba));
+        self.skin_name = name.clone();
+        self.skin_slim = auto_slim;
+        self.profile.skin_path = Some(path.to_string_lossy().to_string());
+        self.profile.skin_slim = auto_slim;
+        self.profile_dirty = true;
+        self.sync_character_mesh_gpu();
+        self.gallery_thumbs.clear();
+        self.dirty.main_viewport = true;
+        self.dirty.gallery = true;
+        self.dirty.inspector = true;
+        let kind_lbl = if auto_slim { "Slim / Alex 3px" } else { "Clásica / Steve 4px" };
+        Ok(format!("Skin cargada: {name} ({kind_lbl})"))
+    }
+
+    pub fn clear_custom_skin(&mut self) {
+        self.skin_pixels = None;
+        self.skin_name.clear();
+        self.profile.skin_path = None;
+        self.profile_dirty = true;
+        self.sync_character_mesh_gpu();
+        self.gallery_thumbs.clear();
+        self.dirty.main_viewport = true;
+        self.dirty.gallery = true;
+        self.dirty.inspector = true;
+    }
+
+    pub fn set_skin_slim(&mut self, slim: bool) {
+        if self.skin_slim == slim {
+            return;
+        }
+        self.skin_slim = slim;
+        self.profile.skin_slim = slim;
+        self.profile_dirty = true;
+        self.sync_character_mesh_gpu();
+        self.gallery_thumbs.clear();
+        self.dirty.main_viewport = true;
+        self.dirty.gallery = true;
+        self.dirty.inspector = true;
+    }
+
+    pub fn set_skin_outer_layer(&mut self, outer: bool) {
+        if self.skin_outer_layer == outer {
+            return;
+        }
+        self.skin_outer_layer = outer;
+        self.profile.skin_outer_layer = outer;
+        self.profile_dirty = true;
+        self.sync_character_mesh_gpu();
+        self.gallery_thumbs.clear();
+        self.dirty.main_viewport = true;
+        self.dirty.gallery = true;
+        self.dirty.inspector = true;
+    }
+
     /// Upload the active weapon mesh to GPU without cloning the WeaponRecord or pixel buffer.
     pub fn ensure_active_weapon_gpu(&mut self) {
         let idx = self.active_weapon_idx.min(self.weapons.len().saturating_sub(1));
         let Some(gpu) = self.gpu.as_mut() else { return };
         let w = &self.weapons[idx];
         if let Some(sp) = &w.icon_rgba {
-            gpu.ensure_weapon_mesh(&w.id, sp.width, sp.height, &sp.rgba, &w.mesh_archetype);
+            gpu.ensure_weapon_mesh(
+                &w.id,
+                sp.width,
+                sp.height,
+                &sp.rgba,
+                &w.mesh_archetype,
+                w.category,
+            );
         }
     }
 
@@ -1126,6 +1589,8 @@ impl AppState {
                 show_onion: false,
                 show_trail: true,
                 show_gizmo: false,
+                gizmo_world_space: true,
+                show_offhand_weapon: false,
                 bg_mode: 0.0,
                 theme_idx,
                 impact_flash: 0.0,
@@ -1302,7 +1767,13 @@ impl AppState {
         let first_added_idx = self.project.clips.len();
         for mut c in demos {
             if !self.project.clips.iter().any(|existing| existing.id == c.id) {
-                snap_clip_to_frame_grid(&mut c);
+                let dur = c.duration.max(0.05);
+                let startup_fps = if c.keyframes.len() <= ((dur * 20.0).round() as usize + 1) {
+                    20.0
+                } else {
+                    30.0
+                };
+                snap_clip_to_fps(&mut c, startup_fps);
                 self.project.clips.push(c);
                 added += 1;
             }
@@ -1482,6 +1953,8 @@ impl AppState {
                     show_onion: compatible && self.onion,
                     show_trail: compatible && self.trail,
                     show_gizmo: self.show_gizmo && matches!(self.tool_mode, ToolMode::Rotate | ToolMode::Scale | ToolMode::Move),
+                    gizmo_world_space: self.gizmo_world_space,
+                    show_offhand_weapon: self.show_offhand_weapon,
                     bg_mode: self.bg_mode as f32,
                     theme_idx: self.theme_idx as f32,
                     impact_flash: if compatible { self.impact_flash } else { 0.0 },
@@ -1519,6 +1992,8 @@ impl AppState {
                     show_onion: false,
                     show_trail: false,
                     show_gizmo: false,
+                    gizmo_world_space: true,
+                    show_offhand_weapon: false,
                     bg_mode: 0.0,
                     theme_idx: self.theme_idx as f32,
                     impact_flash: 0.0,
@@ -1579,6 +2054,8 @@ pub fn export_storyboard_strip(state: &mut AppState) -> Result<PathBuf, String> 
                 show_onion: false,
                 show_trail: true,
                 show_gizmo: false,
+                gizmo_world_space: true,
+                show_offhand_weapon: false,
                 bg_mode: 0.0,
                 theme_idx: state.theme_idx as f32,
                 impact_flash: if is_imp { 0.9 } else { 0.0 },

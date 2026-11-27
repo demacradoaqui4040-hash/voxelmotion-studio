@@ -21,7 +21,11 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+fn default_timeline_fps() -> i32 {
+    20
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalProfile {
     #[serde(default)]
     pub servernuevo_root: Option<String>,
@@ -45,6 +49,36 @@ pub struct LocalProfile {
     pub ui_motion_enabled: bool,
     #[serde(default)]
     pub gpu_low_power: bool,
+    #[serde(default = "default_timeline_fps")]
+    pub timeline_fps: i32,
+    #[serde(default)]
+    pub skin_path: Option<String>,
+    #[serde(default)]
+    pub skin_slim: bool,
+    #[serde(default = "default_true")]
+    pub skin_outer_layer: bool,
+}
+
+impl Default for LocalProfile {
+    fn default() -> Self {
+        Self {
+            servernuevo_root: None,
+            weapon_status: HashMap::new(),
+            clip_status: HashMap::new(),
+            clip_vfx: HashMap::new(),
+            clip_impact_overrides: HashMap::new(),
+            clip_modified_clips: HashMap::new(),
+            clip_allowed_categories: HashMap::new(),
+            clip_allowed_weapons: HashMap::new(),
+            theme_idx: 0,
+            ui_motion_enabled: true,
+            gpu_low_power: false,
+            timeline_fps: 20,
+            skin_path: None,
+            skin_slim: false,
+            skin_outer_layer: true,
+        }
+    }
 }
 
 pub fn discover_servernuevo_root(workspace_root: &Path, profile: &LocalProfile) -> Option<PathBuf> {
@@ -384,20 +418,27 @@ fn classify_modpack_weapon(
     }
 }
 
+fn sorted_zip_entries(zip: &mut ZipArchive<File>, pred: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut entries: Vec<String> = (0..zip.len())
+        .filter_map(|i| {
+            zip.by_index(i)
+                .ok()
+                .and_then(|f| f.name().ok().map(|n| n.into_owned()))
+        })
+        .filter(|n| pred(n))
+        .collect();
+    entries.sort();
+    entries
+}
+
 fn collect_jar_weapon_attributes(
     zip: &mut ZipArchive<File>,
     ns: &str,
 ) -> HashMap<String, ParsedWeaponAttr> {
     let prefix = format!("data/{ns}/weapon_attributes/");
-    let mut paths = Vec::new();
-    for i in 0..zip.len() {
-        if let Ok(f) = zip.by_index(i) {
-            let n = f.name().to_string();
-            if n.starts_with(&prefix) && !n.contains("/compat/") && n.ends_with(".json") {
-                paths.push(n);
-            }
-        }
-    }
+    let paths = sorted_zip_entries(zip, |n| {
+        n.starts_with(&prefix) && !n.contains("/compat/") && n.ends_with(".json")
+    });
     let mut map = HashMap::new();
     for path in paths {
         if let Some(raw_attr) = read_zip_string(zip, &path) {
@@ -1335,11 +1376,9 @@ pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) ->
 
     // 2. Better Combat (`30` PlayerAnimator attack animations).
     if let Some(mut bc_zip) = open_zip(&mods_dir.join("bettercombat-forge-1.9.0+1.20.1.jar")) {
-        let mut entries: Vec<String> = (0..bc_zip.len())
-            .filter_map(|i| bc_zip.by_index(i).ok().map(|f| f.name().to_string()))
-            .filter(|n| n.starts_with("assets/bettercombat/attack_animations/") && n.ends_with(".json"))
-            .collect();
-        entries.sort();
+        let entries = sorted_zip_entries(&mut bc_zip, |n| {
+            n.starts_with("assets/bettercombat/attack_animations/") && n.ends_with(".json")
+        });
         for entry in entries {
             let Some(raw) = read_zip_string(&mut bc_zip, &entry) else { continue };
             let stem = entry.rsplit('/').next().unwrap_or("").trim_end_matches(".json");
@@ -1369,11 +1408,9 @@ pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) ->
 
     // 3. Simply Swords (`34` PlayerAnimator attack animations).
     if let Some(mut ss_zip) = open_zip(&mods_dir.join("simplyswords-forge-neoforge-1.70.2-1.20.1.jar")) {
-        let mut entries: Vec<String> = (0..ss_zip.len())
-            .filter_map(|i| ss_zip.by_index(i).ok().map(|f| f.name().to_string()))
-            .filter(|n| n.starts_with("assets/simplyswords/attack_animations/") && n.ends_with(".json"))
-            .collect();
-        entries.sort();
+        let entries = sorted_zip_entries(&mut ss_zip, |n| {
+            n.starts_with("assets/simplyswords/attack_animations/") && n.ends_with(".json")
+        });
         for entry in entries {
             let Some(raw) = read_zip_string(&mut ss_zip, &entry) else { continue };
             let stem = entry.rsplit('/').next().unwrap_or("").trim_end_matches(".json");
@@ -1418,11 +1455,7 @@ pub fn load_all_combat_animations(server_root: &Path, profile: &LocalProfile) ->
 
     // 5. Punchy Moves / Fluid & Foolish (STRICTLY combat tool animations only — never locomotion or ParCool).
     if let Some(mut ff_zip) = open_zip(&rp_dir.join("Fluid & Foolish 1.0.1.zip")) {
-        let mut entries: Vec<String> = (0..ff_zip.len())
-            .filter_map(|i| ff_zip.by_index(i).ok().map(|f| f.name().to_string()))
-            .filter(|n| is_punchy_combat_tool_file(n))
-            .collect();
-        entries.sort();
+        let entries = sorted_zip_entries(&mut ff_zip, is_punchy_combat_tool_file);
         for entry in entries {
             let Some(raw) = read_zip_string(&mut ff_zip, &entry) else { continue };
             let tool_cats = normalize_categories(infer_punchy_tool_categories(&entry));

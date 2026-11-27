@@ -1,7 +1,9 @@
 // VoxelMotion Studio - Hardware DirectX12/Vulkan Zero-Copy wgpu 30 Multi-Viewport Renderer
 
-use crate::math3d::{camera_basis, evaluate_rig_matrices, gizmo_axes_world, GizmoAxis, Mat4, Vec3};
-use crate::model::{sample_clip_pose, ClipDef, RigPose, VfxKind, BONE_COUNT};
+use crate::math3d::{
+    camera_basis, evaluate_rig_matrices, gizmo_axes_for_space, GizmoAxis, Mat4, Vec3,
+};
+use crate::model::{sample_clip_pose, ClipDef, RigPose, VfxKind, WeaponCategory, BONE_COUNT};
 use crate::voxelizer::{
     build_character_bone_meshes, build_sakura_world_mesh, build_training_dummy_mesh,
     voxelize_weapon_sprite, MeshData, Vertex3D,
@@ -175,6 +177,8 @@ pub struct RenderParams<'a> {
     pub show_onion: bool,
     pub show_trail: bool,
     pub show_gizmo: bool,
+    pub gizmo_world_space: bool,
+    pub show_offhand_weapon: bool,
     pub bg_mode: f32, // 0=Studio, 1=Sakura, 2=Ocean
     pub theme_idx: f32,
     pub impact_flash: f32,
@@ -183,9 +187,16 @@ pub struct RenderParams<'a> {
     pub draw_world_backdrop: bool,
 }
 
+#[derive(Clone)]
+pub struct CachedWeaponMesh {
+    pub mesh: Arc<GpuMesh>,
+    pub blade_base_mc: [f32; 3],
+    pub blade_tip_mc: [f32; 3],
+}
+
 /// Bounded LRU cache for voxelized GPU weapon meshes to cap VRAM growth across large modpacks.
 pub struct WeaponMeshCache {
-    map: HashMap<String, Arc<GpuMesh>>,
+    map: HashMap<String, CachedWeaponMesh>,
     order: VecDeque<String>,
     cap: usize,
 }
@@ -208,19 +219,19 @@ impl WeaponMeshCache {
         self.map.len()
     }
 
-    pub fn get(&self, id: &str) -> Option<Arc<GpuMesh>> {
+    pub fn get(&self, id: &str) -> Option<CachedWeaponMesh> {
         self.map.get(id).cloned()
     }
 
-    pub fn first_any(&self) -> Option<Arc<GpuMesh>> {
+    pub fn first_any(&self) -> Option<CachedWeaponMesh> {
         self.map.values().next().cloned()
     }
 
-    pub fn insert(&mut self, id: String, mesh: Arc<GpuMesh>) {
+    pub fn insert(&mut self, id: String, entry: CachedWeaponMesh) {
         if self.map.contains_key(&id) {
             self.order.retain(|k| k != &id);
             self.order.push_back(id.clone());
-            self.map.insert(id, mesh);
+            self.map.insert(id, entry);
             return;
         }
         while self.map.len() >= self.cap {
@@ -231,7 +242,7 @@ impl WeaponMeshCache {
             }
         }
         self.order.push_back(id.clone());
-        self.map.insert(id, mesh);
+        self.map.insert(id, entry);
     }
 }
 
@@ -283,7 +294,7 @@ fn make_axis_handle_mesh(axis: usize) -> MeshData {
             m.push_box([-0.026, -0.026, 0.36, 0.026, 0.026, 0.42], c);
         }
         _ => {
-            m.push_box([-0.032, -0.032, -0.032, 0.032, 0.032, 0.032], [0.96, 0.96, 0.98]);
+            m.push_box([-0.044, -0.044, -0.044, 0.044, 0.044, 0.044], [0.96, 0.96, 0.98]);
         }
     }
     m
@@ -604,13 +615,33 @@ impl GpuRenderer {
         resolve_tex
     }
 
-    pub fn ensure_weapon_mesh(&mut self, id: &str, w: u32, h: u32, rgba: &[u8], archetype: &str) {
+    pub fn set_character_meshes(&mut self, meshes: &[MeshData; 7]) {
+        self.char_bones = [
+            GpuMesh::from_data(&self.device, &meshes[0]),
+            GpuMesh::from_data(&self.device, &meshes[1]),
+            GpuMesh::from_data(&self.device, &meshes[2]),
+            GpuMesh::from_data(&self.device, &meshes[3]),
+            GpuMesh::from_data(&self.device, &meshes[4]),
+            GpuMesh::from_data(&self.device, &meshes[5]),
+            GpuMesh::from_data(&self.device, &meshes[6]),
+        ];
+    }
+
+    pub fn ensure_weapon_mesh(
+        &mut self,
+        id: &str,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        archetype: &str,
+        category: WeaponCategory,
+    ) {
         if self.weapon_cache.contains(id) {
             return;
         }
         // Cap GPU voxelization grid to <= 32x32 so 64x64 / 128x128 mod sprites stay fast & low-VRAM.
         let max_dim = w.max(h);
-        let mesh_data = if max_dim > 32 && rgba.len() >= (w * h * 4) as usize {
+        let res = if max_dim > 32 && rgba.len() >= (w * h * 4) as usize {
             let scale = (max_dim as f32 / 32.0).ceil() as u32;
             let nw = (w / scale).max(1).min(32);
             let nh = (h / scale).max(1).min(32);
@@ -624,12 +655,18 @@ impl GpuRenderer {
                     small[dst_i..dst_i + 4].copy_from_slice(&rgba[src_i..src_i + 4]);
                 }
             }
-            voxelize_weapon_sprite(nw, nh, &small, archetype)
+            voxelize_weapon_sprite(nw, nh, &small, archetype, category)
         } else {
-            voxelize_weapon_sprite(w, h, rgba, archetype)
+            voxelize_weapon_sprite(w, h, rgba, archetype, category)
         };
-        self.weapon_cache
-            .insert(id.to_string(), Arc::new(GpuMesh::from_data(&self.device, &mesh_data)));
+        self.weapon_cache.insert(
+            id.to_string(),
+            CachedWeaponMesh {
+                mesh: Arc::new(GpuMesh::from_data(&self.device, &res.mesh)),
+                blade_base_mc: res.blade_base_mc,
+                blade_tip_mc: res.blade_tip_mc,
+            },
+        );
     }
 
     pub fn resize_main_if_needed(&mut self, w: u32, h: u32) -> bool {
@@ -647,6 +684,7 @@ impl GpuRenderer {
     fn build_trail_mesh(
         &self,
         clip: &ClipDef,
+        weapon_id: &str,
         current_time: f32,
         solo_weapon: bool,
         impact_flash: f32,
@@ -667,8 +705,19 @@ impl GpuRenderer {
         let trail_rgb = slash_ev.map(|ev| ev.color).unwrap_or([0.56, 0.42, 0.98]);
         let trail_scale = slash_ev.map(|ev| ev.scale.clamp(0.5, 2.2)).unwrap_or(1.0);
 
-        let tip_local = Vec3::new(0.0, -0.7, -15.5 - 9.0 * trail_scale);
-        let base_local = Vec3::new(0.0, -0.4, -15.5);
+        let (base_raw, tip_raw) = self
+            .weapon_cache
+            .get(weapon_id)
+            .or_else(|| self.weapon_cache.first_any())
+            .map(|c| {
+                (
+                    Vec3::new(c.blade_base_mc[0], c.blade_base_mc[1], c.blade_base_mc[2]),
+                    Vec3::new(c.blade_tip_mc[0], c.blade_tip_mc[1], c.blade_tip_mc[2]),
+                )
+            })
+            .unwrap_or((Vec3::new(0.0, -0.4, -15.5), Vec3::new(0.0, -0.7, -24.5)));
+        let base_local = base_raw;
+        let tip_local = base_local.add(tip_raw.sub(base_local).mul(trail_scale));
 
         let mut pts = Vec::with_capacity(steps + 1);
         for i in 0..=steps {
@@ -862,7 +911,14 @@ impl GpuRenderer {
 
         // Build trail dynamic mesh before taking disjoint mutable slice borrow for slot packing
         let dyn_mesh = if params.show_trail && !params.solo_weapon {
-            self.build_trail_mesh(params.clip, params.current_time, false, params.impact_flash, eye)
+            self.build_trail_mesh(
+                params.clip,
+                params.weapon_id,
+                params.current_time,
+                false,
+                params.impact_flash,
+                eye,
+            )
         } else {
             MeshData::new()
         };
@@ -957,11 +1013,24 @@ impl GpuRenderer {
             opaque_draws.push((w_off, 10));
             slot += 1;
         }
+        let show_left_item = !params.solo_weapon
+            && !params.hidden_bones[9]
+            && (params.show_offhand_weapon || !params.pose.bone(9).is_identity());
+        if show_left_item {
+            let lw_hi = if params.selected_bone == 9 && surface_idx == 0 { 1.0 } else { 0.0 };
+            let lw_off = write_slot(slot, mats[9].m, [1.0, 1.0, 1.0, lw_hi]);
+            opaque_draws.push((lw_off, 10));
+            slot += 1;
+        }
 
         // Alpha draws (shadow + dual onion ghosts + slash ribbon)
         let mut alpha_draws: Vec<(u32, u8)> = Vec::new();
         if params.show_shadows {
-            let shadow_m = Mat4::translate(0.0, 0.0, 0.0).mul(Mat4::scale(1.15, 1.0, 1.15));
+            let rx = mats[8].m[12];
+            let ry = mats[8].m[13].max(0.0);
+            let rz = mats[8].m[14];
+            let s_scale = (1.15 / (1.0 + ry * 0.45)).clamp(0.45, 1.15);
+            let shadow_m = Mat4::translate(rx, 0.0, rz).mul(Mat4::scale(s_scale, 1.0, s_scale));
             let off = write_slot(slot, shadow_m.m, [1.0, 1.0, 1.0, 3.0]);
             alpha_draws.push((off, 20)); // shadow disk
             slot += 1;
@@ -986,6 +1055,11 @@ impl GpuRenderer {
                 if !params.hidden_bones[5] {
                     let gwoff = write_slot(slot, gmats[5].m, [1.0, 1.0, 1.0, mode_w]);
                     alpha_draws.push((gwoff, 10));
+                    slot += 1;
+                }
+                if !params.hidden_bones[9] && (params.show_offhand_weapon || !gp.bone(9).is_identity()) {
+                    let gloff = write_slot(slot, gmats[9].m, [1.0, 1.0, 1.0, mode_w]);
+                    alpha_draws.push((gloff, 10));
                     slot += 1;
                 }
             };
@@ -1020,9 +1094,10 @@ impl GpuRenderer {
             let bone_m = if params.solo_weapon {
                 weapon_model
             } else {
-                mats[params.selected_bone.min(7)]
+                mats[params.selected_bone.min(BONE_COUNT - 1)]
             };
-            let (pivot_world, axes) = gizmo_axes_world(bone_m, params.solo_weapon);
+            let (pivot_world, axes) =
+                gizmo_axes_for_space(bone_m, params.solo_weapon, params.gizmo_world_space);
             let hl = if params.active_gizmo != GizmoAxis::None { params.active_gizmo } else { params.hovered_gizmo };
             let axis_tint = |axis: GizmoAxis| -> [f32; 4] {
                 if hl == axis {
@@ -1123,7 +1198,7 @@ impl GpuRenderer {
                 rpass.set_bind_group(1, &self.mesh_bg, &[off]);
                 let mesh_ref: Option<&GpuMesh> = match kind {
                     0..=6 => Some(&self.char_bones[kind]),
-                    10 => active_weapon.as_deref(),
+                    10 => active_weapon.as_ref().map(|w| w.mesh.as_ref()),
                     11 => self.sakura_world.as_ref(),
                     12 => self.training_dummy.as_ref(),
                     _ => None,
@@ -1142,7 +1217,7 @@ impl GpuRenderer {
                 rpass.set_bind_group(1, &self.mesh_bg, &[off]);
                 let gm: Option<&GpuMesh> = match kind {
                     0..=6 => Some(&self.char_bones[kind as usize]),
-                    10 => active_weapon.as_deref(),
+                    10 => active_weapon.as_ref().map(|w| w.mesh.as_ref()),
                     20 => Some(&self.shadow_disk),
                     _ => None,
                 };

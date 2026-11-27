@@ -87,6 +87,7 @@ export component StudioButton inherits TouchArea {
     in property <string> label;
     in property <bool> active: false;
     in property <bool> primary: false;
+    in property <bool> danger: false;
     in property <bool> compact: false;
     in property <bool> ghost: false;
     in property <bool> mono: false;
@@ -98,19 +99,22 @@ export component StudioButton inherits TouchArea {
         border-radius: Theme.radius-control;
         background: root.primary
             ? (root.pressed ? Theme.accent-press : (root.has-hover ? Theme.accent-hover : Theme.accent))
-            : (root.pressed ? Theme.bg-active
-                : (root.active ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
-                    : (root.has-hover ? Theme.bg-hover
-                        : (root.ghost || Theme.wireframe-controls ? transparent : Theme.bg-elevated))));
+            : (root.danger
+                ? (root.active ? #ff453a28 : (root.has-hover ? #ff453a1c : (root.ghost || Theme.wireframe-controls ? transparent : Theme.bg-elevated)))
+                : (root.pressed ? Theme.bg-active
+                    : (root.active ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
+                        : (root.has-hover ? Theme.bg-hover
+                            : (root.ghost || Theme.wireframe-controls ? transparent : Theme.bg-elevated)))));
         border-width: (root.ghost && !root.active && !root.has-hover && !root.primary) ? 0px : Theme.border-control-w;
         border-color: root.primary ? Theme.accent
-                    : (root.active ? (Theme.wireframe-controls ? Theme.accent : Theme.border-specular) : Theme.border-control);
+                    : (root.danger && root.active ? Theme.axis-x
+                    : (root.active ? (Theme.wireframe-controls ? Theme.accent : Theme.border-specular) : Theme.border-control));
         animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
         animate border-color { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 
         Text {
             text: root.label;
-            color: root.primary ? #ffffff : (root.active || root.has-hover ? Theme.text-primary : Theme.text-secondary);
+            color: root.primary ? #ffffff : (root.danger ? Theme.axis-x : (root.active || root.has-hover ? Theme.text-primary : Theme.text-secondary));
             font-family: (root.mono || Theme.mono-headers) ? Theme.font-mono : Theme.font-ui;
             font-size: root.font-size;
             font-weight: (root.primary || root.active) ? 600 : 500;
@@ -124,15 +128,22 @@ export component StudioButton inherits TouchArea {
 // Compact Vector Icon Action Button (unified 24x24 Lucide grid, zero text clutter)
 export component IconActionBtn inherits TouchArea {
     in property <string> path-cmd;
+    in property <string> tip: "";
     in property <bool> active: false;
     in property <bool> primary: false;
     in property <bool> filled: false;
     in property <bool> disabled: false;
     in property <length> icon-size: 14px;
     in property <length> optical-x: 0px;
+    callback hover-changed(bool, string, length, length);
     width: 26px;
     height: 26px;
     mouse-cursor: root.disabled ? default : pointer;
+    changed has-hover => {
+        if (root.tip != "") {
+            root.hover-changed(self.has-hover, root.tip, self.absolute-position.x + self.width / 2, self.absolute-position.y);
+        }
+    }
 
     Rectangle {
         border-radius: Theme.radius-control;
@@ -167,18 +178,25 @@ export component IconActionBtn inherits TouchArea {
 
 export component ToolRailBtn inherits TouchArea {
     in property <string> path-cmd;
+    in property <string> tip: "";
     in property <bool> active: false;
+    callback hover-changed(bool, string, length, length);
     width: 28px;
     height: 28px;
     mouse-cursor: pointer;
+    changed has-hover => {
+        if (root.tip != "") {
+            root.hover-changed(self.has-hover, root.tip, self.absolute-position.x + self.width / 2, self.absolute-position.y);
+        }
+    }
 
     Rectangle {
         border-radius: Theme.radius-control;
         background: root.pressed ? Theme.bg-active
-                  : (root.active ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
+                  : (root.active ? Theme.accent-soft
                   : (root.has-hover ? Theme.bg-hover : transparent));
         border-width: root.active ? 1px : 0px;
-        border-color: Theme.wireframe-controls ? Theme.accent : Theme.border-specular;
+        border-color: Theme.accent;
         animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
 
         Path {
@@ -189,7 +207,7 @@ export component ToolRailBtn inherits TouchArea {
             viewbox-width: 24;
             viewbox-height: 24;
             fill: transparent;
-            stroke: root.active || root.has-hover ? Theme.text-primary : Theme.text-secondary;
+            stroke: root.active ? Theme.accent : (root.has-hover ? Theme.text-primary : Theme.text-secondary);
             stroke-width: 1.65px;
             stroke-line-cap: round;
             stroke-line-join: round;
@@ -294,16 +312,9 @@ export component AxisCell inherits Rectangle {
 
             HorizontalLayout {
                 spacing: 4px;
-                Rectangle {
-                    width: 2.5px;
-                    height: 10px;
-                    y: (parent.height - self.height) / 2;
-                    border-radius: 1px;
-                    background: root.axis-color;
-                }
                 Text {
                     text: root.axis;
-                    color: Theme.text-secondary;
+                    color: root.axis-color;
                     font-family: Theme.mono-headers ? Theme.font-mono : Theme.font-ui;
                     font-size: Theme.fs-meta;
                     font-weight: 700;
@@ -326,6 +337,8 @@ export component AxisCell inherits Rectangle {
             width: 10px;
             alignment: center;
             spacing: 2px;
+            opacity: (drag-ta.has-hover || up-ta.has-hover || dn-ta.has-hover) ? 1.0 : 0.0;
+            animate opacity { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
             up-ta := TouchArea {
                 height: 8px;
                 mouse-cursor: pointer;

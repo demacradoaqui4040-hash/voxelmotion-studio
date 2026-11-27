@@ -81,6 +81,7 @@ fn run_headless_smoke(out_png: Option<&Path>) -> Result<(), String> {
             sp.height,
             &sp.rgba,
             &state.weapons[0].mesh_archetype,
+            state.weapons[0].category,
         );
     }
     let clip = state.active_clip().clone();
@@ -106,6 +107,8 @@ fn run_headless_smoke(out_png: Option<&Path>) -> Result<(), String> {
                 show_onion: false,
                 show_trail: true,
                 show_gizmo: true,
+                gizmo_world_space: true,
+                show_offhand_weapon: false,
                 bg_mode: 1.0,
                 theme_idx: state.theme_idx as f32,
                 impact_flash: if (t - clip.impact_time.unwrap_or(0.2)).abs() < 0.04 {
@@ -217,6 +220,7 @@ fn run_calibration_spike() -> Result<(), String> {
     let (device, queue) = pollster_block_on(adapter.request_device(&Default::default()))
         .map_err(|e| format!("Device failed: {e:?}"))?;
     state.gpu = Some(GpuRenderer::new(device, queue));
+    state.sync_character_mesh_gpu();
 
     for (idx, (_, _, weapon_idx)) in targets.iter().enumerate() {
         state.active_clip_idx = idx;
@@ -422,8 +426,14 @@ mod tests {
         assert!(weapons[0].icon_rgba.is_some());
 
         let sp = weapons[0].icon_rgba.as_ref().unwrap();
-        let mesh = voxelizer::voxelize_weapon_sprite(sp.width, sp.height, &sp.rgba, &weapons[0].mesh_archetype);
-        assert!(!mesh.indices.is_empty());
+        let res = voxelizer::voxelize_weapon_sprite(
+            sp.width,
+            sp.height,
+            &sp.rgba,
+            &weapons[0].mesh_archetype,
+            weapons[0].category,
+        );
+        assert!(!res.mesh.indices.is_empty());
 
         let tmp = std::env::temp_dir().join("vm_import_export_test");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -507,7 +517,7 @@ mod tests {
         let _idx_auto = s.editable_kf_index();
         assert_eq!(s.active_clip().keyframes.len(), orig_len + 1);
 
-        let (pivot, axes, vp) = s.active_gizmo_geom();
+        let (pivot, axes, parent_axes, bone_axes, vp) = s.active_gizmo_geom();
         let (cam_r, cam_u, cam_f) = camera_basis(s.main_cam.current.yaw, s.main_cam.current.pitch);
         let center_px = math3d::project_to_screen(vp, pivot, 900.0, 520.0).unwrap();
         let pick_c = pick_gizmo_handle(center_px.0, center_px.1, vp, 900.0, 520.0, pivot, axes, cam_r, 0.42, 0.425);
@@ -518,10 +528,10 @@ mod tests {
         assert_eq!(pick_y, GizmoAxis::Y);
 
         let mut bt = BoneTransform::default();
-        apply_gizmo_drag(&mut bt, ToolMode::Rotate, GizmoAxis::Y, axes, cam_r, cam_u, cam_f, vp, 900.0, 520.0, pivot, 400.0, 260.0, 440.0, 260.0);
+        apply_gizmo_drag(&mut bt, ToolMode::Rotate, GizmoAxis::Y, axes, parent_axes, bone_axes, cam_r, cam_u, cam_f, vp, 900.0, 520.0, pivot, 400.0, 260.0, 440.0, 260.0);
         assert!(bt.rot[1].abs() > 1.0 && bt.rot[0] == 0.0 && bt.rot[2] == 0.0);
 
-        apply_gizmo_drag(&mut bt, ToolMode::Move, GizmoAxis::Free, axes, cam_r, cam_u, cam_f, vp, 900.0, 520.0, pivot, 400.0, 260.0, 420.0, 240.0);
+        apply_gizmo_drag(&mut bt, ToolMode::Move, GizmoAxis::Free, axes, parent_axes, bone_axes, cam_r, cam_u, cam_f, vp, 900.0, 520.0, pivot, 400.0, 260.0, 420.0, 240.0);
         assert!(bt.pos.iter().any(|v| v.abs() > 0.01));
 
         let before = s.main_cam.current.target;
@@ -532,7 +542,7 @@ mod tests {
 
         s.active_bone_idx = 3; // BrazoDerecho
         let arm_px = {
-            let (pivot, _, vp) = s.active_gizmo_geom();
+            let (pivot, _, _, _, vp) = s.active_gizmo_geom();
             math3d::project_to_screen(vp, pivot, 900.0, 520.0).unwrap()
         };
         let orig_tgt = s.main_cam.target_pos;
@@ -608,7 +618,14 @@ mod tests {
                 let mut gpu = GpuRenderer::new(device, queue);
                 let (_, _, px) = catalog::make_archetype_sprite("sword", [200, 200, 220]);
                 for i in 0..40 {
-                    gpu.ensure_weapon_mesh(&format!("w_{i}"), 16, 16, &px, "sword");
+                    gpu.ensure_weapon_mesh(
+                        &format!("w_{i}"),
+                        16,
+                        16,
+                        &px,
+                        "sword",
+                        crate::model::WeaponCategory::Espadas,
+                    );
                 }
                 assert_eq!(gpu.weapon_cache.len(), 32, "LRU cache must bound GPU mesh count");
                 assert!(!gpu.weapon_cache.contains("w_0"));
@@ -730,7 +747,7 @@ mod tests {
         s.current_time = 0.30;
         let k_mid = s.ensure_bone_kf_at(0.30, 3, crate::model::EasingMode::Linear);
         s.active_clip_mut().keyframes[k_mid].bones.0[3].rot = [-60.0, 24.0, -10.0];
-        assert_eq!(s.active_clip().keyframes[k_mid].bone_mask, 1u8 << 3);
+        assert_eq!(s.active_clip().keyframes[k_mid].bone_mask, 1u16 << 3);
 
         // Single-frame bone copy from right_arm @ 0.30s -> paste @ 0.45s
         assert_eq!(s.copy_bone_frames(3, false), 1);
@@ -805,10 +822,10 @@ mod tests {
         clip.impact_time = Some(0.19);
         clip.keyframes = vec![
             crate::model::Keyframe { time: 0.0, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
-            crate::model::Keyframe { time: 0.09, easing: crate::model::EasingMode::Snap, bones: Default::default(), bone_mask: 1u8 << 3 },
+            crate::model::Keyframe { time: 0.09, easing: crate::model::EasingMode::Snap, bones: Default::default(), bone_mask: 1u16 << 3 },
             crate::model::Keyframe { time: 0.19, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
-            crate::model::Keyframe { time: 0.342, easing: crate::model::EasingMode::EaseInOut, bones: Default::default(), bone_mask: 1u8 << 3 },
-            crate::model::Keyframe { time: 0.352, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: 1u8 << 4 },
+            crate::model::Keyframe { time: 0.342, easing: crate::model::EasingMode::EaseInOut, bones: Default::default(), bone_mask: 1u16 << 3 },
+            crate::model::Keyframe { time: 0.352, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: 1u16 << 4 },
             crate::model::Keyframe { time: 0.48, easing: crate::model::EasingMode::Linear, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
         ];
         crate::model::snap_clip_to_frame_grid(&mut clip);
@@ -821,5 +838,323 @@ mod tests {
         let f_imp = (clip.impact_time.unwrap() / dur) * frames;
         assert!((f_imp - f_imp.round()).abs() < 1e-4);
         assert!(clip.keyframes.windows(2).all(|w| w[1].time > w[0].time + 0.005));
+    }
+
+    #[test]
+    fn natural_density_20fps_extend_pack_spread_and_step_easing_work() {
+        let root = detect_workspace_root();
+        let mut s = AppState::new(root);
+        let mut clip = create_blank_clip(88);
+        clip.duration = 0.75; // 15f @ 20 FPS
+        clip.keyframes = vec![
+            crate::model::Keyframe { time: 0.0, easing: crate::model::EasingMode::Step, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
+            crate::model::Keyframe { time: 0.25, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: 1u16 << 3 },
+            crate::model::Keyframe { time: 0.50, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: 1u16 << 3 },
+            crate::model::Keyframe { time: 0.75, easing: crate::model::EasingMode::Linear, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
+        ];
+        clip.keyframes[0].bones.0[3].rot[0] = 15.0;
+        clip.keyframes[1].bones.0[3].rot[0] = 90.0;
+        clip.keyframes[2].bones.0[3].rot[0] = -30.0;
+        s.project.clips.push(clip);
+        s.active_clip_idx = s.project.clips.len() - 1;
+        s.timeline_fps = 20;
+
+        // Natural 28px/f ruler at 1176px -> 42 visible frames, 15f ends at 15/42 (~0.357), labels stop at 15
+        let ticks = ui_bridge::build_ruler_ticks_frames(15, 0.0, 42.0, 1176.0);
+        let labels: Vec<String> = ticks.iter().filter(|t| !t.label.is_empty()).map(|t| t.label.to_string()).collect();
+        assert_eq!(labels.last().map(String::as_str), Some("15"));
+        let t15 = ticks.iter().find(|t| t.label == "15").unwrap();
+        assert!((t15.frac - (15.0 / 42.0)).abs() < 1e-3);
+
+        // EasingMode::Step holds pose until next keyframe
+        let held = sample_clip_pose(s.active_clip(), 0.20);
+        assert!((held.bone(3).rot[0] - 15.0).abs() < 1e-3);
+
+        // Extending 15f -> 30f preserves timing in seconds (0.25s and 0.50s stay at 5f and 10f!)
+        s.set_clip_frames_preserve_timing(30);
+        assert_eq!(s.active_total_frames(), 30);
+        assert!((s.active_clip().duration - 1.50).abs() < 1e-3);
+        assert!((s.active_clip().keyframes[1].time - 0.25).abs() < 1e-3);
+        assert!((s.active_clip().keyframes[2].time - 0.50).abs() < 1e-3);
+
+        // Pack compacts gaps progressively ([0, 5, 10, 15] -> [0, 3, 6, 9] -> [0, 2, 4, 6] -> [0, 1, 2, 3])
+        s.active_bone_idx = 3;
+        assert!(s.pack_or_spread_keyframes(true, true) > 0);
+        let kf_step1: Vec<i32> = s.active_clip().keyframes.iter()
+            .filter(|k| k.has_bone(3))
+            .map(|k| (k.time * 20.0).round() as i32)
+            .collect();
+        assert_eq!(kf_step1, vec![0, 3, 6, 9]);
+        s.pack_or_spread_keyframes(true, true);
+        s.pack_or_spread_keyframes(true, true);
+        let kf_packed: Vec<i32> = s.active_clip().keyframes.iter()
+            .filter(|k| k.has_bone(3))
+            .map(|k| (k.time * 20.0).round() as i32)
+            .collect();
+        assert_eq!(kf_packed, vec![0, 1, 2, 3]);
+
+        // Spread pushes keyframes apart (+1f per gap -> [0, 2, 4, 6])
+        assert!(s.pack_or_spread_keyframes(false, true) > 0);
+        let kf_spread: Vec<i32> = s.active_clip().keyframes.iter()
+            .filter(|k| k.has_bone(3))
+            .map(|k| (k.time * 20.0).round() as i32)
+            .collect();
+        assert_eq!(kf_spread, vec![0, 2, 4, 6]);
+
+        // Nudge +1f at playhead (frame 2 = 0.10s) shifts that bone keyframe -> [0, 3, 4, 6]
+        s.current_time = 0.10;
+        assert!(s.nudge_keyframes(1, true) > 0);
+        let kf_nudged: Vec<i32> = s.active_clip().keyframes.iter()
+            .filter(|k| k.has_bone(3))
+            .map(|k| (k.time * 20.0).round() as i32)
+            .collect();
+        assert_eq!(kf_nudged, vec![0, 3, 4, 6]);
+
+        // Nudging +1f again onto frame 4 would collide with an existing keyframe -> refuse safely (0)
+        assert_eq!(s.nudge_keyframes(1, true), 0);
+        let kf_after_block: Vec<i32> = s.active_clip().keyframes.iter()
+            .filter(|k| k.has_bone(3))
+            .map(|k| (k.time * 20.0).round() as i32)
+            .collect();
+        assert_eq!(kf_after_block, vec![0, 3, 4, 6]);
+    }
+
+    #[test]
+    fn gallery_group_collapse_toggles_cleanly() {
+        let root = detect_workspace_root();
+        let mut s = AppState::new(root);
+        assert_eq!(s.collapsed_gallery_groups, [false; 5]);
+        s.toggle_gallery_group(0);
+        assert!(s.collapsed_gallery_groups[0]);
+        s.toggle_gallery_group(0);
+        assert!(!s.collapsed_gallery_groups[0]);
+        s.toggle_gallery_group(-1);
+        s.toggle_gallery_group(99);
+        assert_eq!(s.collapsed_gallery_groups, [false; 5]);
+    }
+
+    #[test]
+    fn root_lifts_entire_rig_left_item_imports_and_scale_exports() {
+        let mut pose = crate::model::RigPose::ZERO;
+        pose.0[8].pos = [0.0, 16.0, 0.0]; // +1.0m lift on root
+        let mats = crate::math3d::evaluate_rig_matrices(&pose);
+        assert!((mats[8].m[13] - 1.0).abs() < 1e-4, "root height");
+        assert!((mats[0].m[13] - 1.75).abs() < 1e-4, "waist lifted by root");
+        assert!((mats[2].m[13] - 2.50).abs() < 1e-4, "head lifted by root");
+        assert!((mats[6].m[13] - 1.75).abs() < 1e-4, "right_leg lifted by root");
+        assert!((mats[7].m[13] - 1.75).abs() < 1e-4, "left_leg lifted by root");
+
+        // Unclamped free rotation (360+ deg) & height (>24px) via apply_gizmo_drag
+        let mut tr = crate::model::BoneTransform::IDENTITY;
+        tr.rot[0] = 210.0;
+        let id_axes = [
+            crate::math3d::Vec3::new(1.0, 0.0, 0.0),
+            crate::math3d::Vec3::new(0.0, 1.0, 0.0),
+            crate::math3d::Vec3::new(0.0, 0.0, 1.0),
+        ];
+        crate::math3d::apply_gizmo_drag(
+            &mut tr,
+            crate::model::ToolMode::Rotate,
+            crate::math3d::GizmoAxis::Free,
+            id_axes,
+            id_axes,
+            id_axes,
+            crate::math3d::Vec3::new(1.0, 0.0, 0.0),
+            crate::math3d::Vec3::new(0.0, 1.0, 0.0),
+            crate::math3d::Vec3::new(0.0, 0.0, -1.0),
+            crate::math3d::Mat4::IDENTITY,
+            1000.0,
+            700.0,
+            crate::math3d::Vec3::ZERO,
+            0.0,
+            0.0,
+            180.0,
+            90.0,
+        );
+        assert!(tr.rot[1].abs() > 5.0 && tr.rot[0].abs() > 180.0);
+
+        // Legacy 8-bone full-body mask (0x00FF) upgrades to ALL_BONES_MASK
+        let legacy_kf: crate::model::Keyframe =
+            serde_json::from_str(r#"{"time":0.0,"easing":"Linear","bones":{},"bone_mask":255}"#).unwrap();
+        assert_eq!(legacy_kf.bone_mask, crate::model::ALL_BONES_MASK);
+
+        // Import Bedrock root + left_item + scale, and export scale + 10 bones
+        let raw = r#"{
+            "format_version": "1.8.0",
+            "animations": {
+                "animation.dual.leap": {
+                    "animation_length": 0.4,
+                    "bones": {
+                        "root": { "position": { "0": [0, 32, 0] }, "rotation": { "0.4": [0, 360, 0] } },
+                        "left_item": { "rotation": { "0": [-35, 10, 0] }, "scale": { "0.2": [1.4, 1.4, 1.4] } }
+                    }
+                }
+            }
+        }"#;
+        let clips = crate::modpack::parse_bedrock_animation_json(
+            raw,
+            crate::model::ClipSource::Personalizado,
+            crate::model::CurationStatus::Aprobada,
+        )
+        .unwrap();
+        assert_eq!(clips.len(), 1);
+        let clip = &clips[0];
+        let root_0 = sample_clip_pose(clip, 0.0);
+        assert!((root_0["root"].pos[1] - 32.0).abs() < 0.1);
+        let mid_pose = sample_clip_pose(clip, 0.2);
+        assert!((mid_pose["left_item"].scale[0] - 1.4).abs() < 0.05);
+
+        let tmp = std::env::temp_dir().join("voxelmotion_phase1_rig_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let proj = crate::model::AnimatorProject {
+            version: 2,
+            clips: vec![clip.clone()],
+        };
+        let sum = crate::exporter::export_project(
+            &proj,
+            &tmp,
+            Some(&tmp),
+            crate::exporter::ExportFormat::Bedrock18,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(sum.clips_exported, 1);
+        let exported = std::fs::read_to_string(tmp.join("voxelmotion.animation.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let anim_entry = val["animations"].as_object().unwrap().values().next().unwrap();
+        let bones = &anim_entry["bones"];
+        assert!(bones.get("root").is_some(), "Export must include root");
+        assert!(bones["left_item"].get("scale").is_some(), "Export must include scale");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn minecraft_skin_64x64_and_64x32_build_steve_and_alex_meshes_cleanly() {
+        // Synthesize a valid 64x64 Alex skin: base body/limbs opaque, right-arm slim 3px (x=44..47) opaque,
+        // unused Alex right-arm column (x=54..56, y=20..32) transparent, plus head & jacket overlay pixels.
+        let mut rgba64 = vec![0u8; 64 * 64 * 4];
+        let mut paint = |x0: u32, y0: u32, x1: u32, y1: u32, c: [u8; 4]| {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let idx = ((y * 64 + x) * 4) as usize;
+                    rgba64[idx..idx + 4].copy_from_slice(&c);
+                }
+            }
+        };
+        paint(0, 0, 32, 16, [220, 178, 148, 255]);   // head base
+        paint(32, 0, 64, 16, [40, 28, 84, 255]);     // head overlay (hat)
+        paint(16, 16, 40, 32, [34, 62, 118, 255]);   // body base
+        paint(16, 32, 40, 48, [18, 32, 64, 255]);    // body overlay (jacket)
+        paint(40, 16, 54, 32, [200, 160, 130, 255]); // slim right arm (cols 54..56 left transparent!)
+        paint(32, 48, 46, 64, [200, 160, 130, 255]); // slim left arm
+        paint(0, 16, 16, 32, [28, 30, 42, 255]);     // right leg
+        paint(16, 48, 32, 64, [28, 30, 42, 255]);    // left leg
+
+        assert!(
+            voxelizer::detect_skin_slim_heuristic(&rgba64, 64, 64),
+            "Alex 3px arm skin must be auto-detected"
+        );
+
+        let alex_outer = voxelizer::build_skin_character_meshes(&rgba64, 64, 64, true, true);
+        let alex_flat = voxelizer::build_skin_character_meshes(&rgba64, 64, 64, true, false);
+        let steve_flat = voxelizer::build_skin_character_meshes(&rgba64, 64, 64, false, false);
+
+        for idx in 1..7 {
+            assert!(!alex_outer[idx].vertices.is_empty(), "Bone mesh {idx} must be populated");
+        }
+        assert!(
+            alex_outer[1].vertices.len() > alex_flat[1].vertices.len()
+                && alex_outer[2].vertices.len() > alex_flat[2].vertices.len(),
+            "Enabling 2nd overlay layer must emit jacket & hat overlay geometry"
+        );
+
+        let x_span = |m: &voxelizer::MeshData| -> f32 {
+            let mut min_x = f32::MAX;
+            let mut max_x = f32::MIN;
+            for v in &m.vertices {
+                min_x = min_x.min(v.pos[0]);
+                max_x = max_x.max(v.pos[0]);
+            }
+            max_x - min_x
+        };
+        assert!((x_span(&alex_flat[3]) - 3.0).abs() < 0.01, "Alex arm width must be 3px");
+        assert!((x_span(&steve_flat[3]) - 4.0).abs() < 0.01, "Steve arm width must be 4px");
+
+        // Legacy 64x32 skin fallback (mirrors right arm/leg cleanly to left)
+        let mut rgba32 = vec![0u8; 64 * 32 * 4];
+        rgba32.copy_from_slice(&rgba64[..64 * 32 * 4]);
+        let legacy = voxelizer::build_skin_character_meshes(&rgba32, 64, 32, false, true);
+        for idx in 1..7 {
+            assert!(!legacy[idx].indices.is_empty());
+        }
+    }
+
+    #[test]
+    fn weapon_voxelizer_calibrates_length_and_blade_bounds_by_category() {
+        let (_, _, px) = catalog::make_archetype_sprite("sword", [190, 210, 240]);
+        let dagger = voxelizer::voxelize_weapon_sprite(
+            16,
+            16,
+            &px,
+            "dagger",
+            crate::model::WeaponCategory::Dagas,
+        );
+        let katana = voxelizer::voxelize_weapon_sprite(
+            16,
+            16,
+            &px,
+            "katana",
+            crate::model::WeaponCategory::Katanas,
+        );
+        let greatsword = voxelizer::voxelize_weapon_sprite(
+            16,
+            16,
+            &px,
+            "heavy",
+            crate::model::WeaponCategory::Mandobles,
+        );
+        let spear = voxelizer::voxelize_weapon_sprite(
+            16,
+            16,
+            &px,
+            "polearm",
+            crate::model::WeaponCategory::Lanzas,
+        );
+        let shield = voxelizer::voxelize_weapon_sprite(
+            16,
+            16,
+            &px,
+            "shield",
+            crate::model::WeaponCategory::Escudos,
+        );
+        let musket = voxelizer::voxelize_weapon_sprite(
+            16,
+            16,
+            &px,
+            "ranged",
+            crate::model::WeaponCategory::Fuego,
+        );
+
+        for res in [&dagger, &katana, &greatsword, &spear, &shield, &musket] {
+            assert!(!res.mesh.indices.is_empty());
+        }
+        assert!(
+            greatsword.blade_tip_mc[2] < katana.blade_tip_mc[2]
+                && katana.blade_tip_mc[2] < dagger.blade_tip_mc[2],
+            "Weapon length progression Mandoble > Katana > Daga must match blade tip reach: greatsword={:?} katana={:?} dagger={:?}",
+            greatsword.blade_tip_mc,
+            katana.blade_tip_mc,
+            dagger.blade_tip_mc
+        );
+        assert!(
+            spear.blade_tip_mc[2] < dagger.blade_tip_mc[2],
+            "Polearms must project further than daggers"
+        );
+        assert!(
+            shield.blade_tip_mc[2] < shield.blade_base_mc[2],
+            "Shield blade bounds must stay ordered cleanly"
+        );
     }
 }

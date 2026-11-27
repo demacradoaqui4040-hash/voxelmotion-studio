@@ -430,7 +430,9 @@ pub fn import_weapons_from_paths(paths: &[PathBuf]) -> Vec<WeaponRecord> {
 
             for i in 0..zip.len() {
                 if let Ok(mut f) = zip.by_index(i) {
-                    let name = f.name().to_string();
+                    let Ok(name) = f.name().map(|n| n.into_owned()) else {
+                        continue;
+                    };
                     if (name.contains("/textures/item/") || name.contains("/textures/items/"))
                         && name.ends_with(".png")
                         && !name.contains("_layer")

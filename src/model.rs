@@ -7,7 +7,7 @@ use std::fmt;
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
-pub const BONE_COUNT: usize = 8;
+pub const BONE_COUNT: usize = 10;
 
 pub const BONE_NAMES: [&str; BONE_COUNT] = [
     "waist",
@@ -18,6 +18,8 @@ pub const BONE_NAMES: [&str; BONE_COUNT] = [
     "right_item",
     "right_leg",
     "left_leg",
+    "root",
+    "left_item",
 ];
 
 pub const BONE_LABELS_ES: [&str; BONE_COUNT] = [
@@ -29,7 +31,11 @@ pub const BONE_LABELS_ES: [&str; BONE_COUNT] = [
     "Espada",
     "PiernaDerecha",
     "PiernaIzquierda",
+    "Raíz",
+    "ArmaIzq",
 ];
+
+pub const DISPLAY_BONE_ORDER: [usize; BONE_COUNT] = [8, 0, 1, 2, 3, 4, 5, 9, 6, 7];
 
 /// Map a canonical bone identifier to its fixed rig array index in O(1) without heap lookups.
 #[inline]
@@ -43,6 +49,8 @@ pub fn bone_index_by_name(name: &str) -> Option<usize> {
         "right_item" => Some(5),
         "right_leg" => Some(6),
         "left_leg" => Some(7),
+        "root" => Some(8),
+        "left_item" => Some(9),
         _ => None,
     }
 }
@@ -168,6 +176,7 @@ pub enum EasingMode {
     EaseOut,
     EaseInOut,
     Linear,
+    Step,
 }
 
 impl EasingMode {
@@ -177,6 +186,7 @@ impl EasingMode {
             Self::EaseOut => 1,
             Self::EaseInOut => 2,
             Self::Linear => 3,
+            Self::Step => 4,
         }
     }
     pub fn from_index(i: i32) -> Self {
@@ -184,6 +194,7 @@ impl EasingMode {
             0 => Self::Snap,
             1 => Self::EaseOut,
             2 => Self::EaseInOut,
+            4 => Self::Step,
             _ => Self::Linear,
         }
     }
@@ -206,6 +217,13 @@ impl EasingMode {
                 }
             }
             Self::Linear => t,
+            Self::Step => {
+                if t >= 0.999 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         }
     }
 }
@@ -362,10 +380,16 @@ impl<'de> Deserialize<'de> for RigPose {
     }
 }
 
-pub const ALL_BONES_MASK: u8 = 0xFF;
+pub const ALL_BONES_MASK: u16 = (1u16 << BONE_COUNT) - 1;
 
-fn default_bone_mask() -> u8 {
+fn default_bone_mask() -> u16 {
     ALL_BONES_MASK
+}
+
+fn deserialize_bone_mask<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let raw = u16::deserialize(deserializer)?;
+    // Upgrade legacy 8-bone full-body masks (0x00FF) seamlessly so imported keyframes cover root/left_item too.
+    Ok(if raw == 0x00FF { ALL_BONES_MASK } else { raw & ALL_BONES_MASK })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -373,19 +397,19 @@ pub struct Keyframe {
     pub time: f32,
     pub easing: EasingMode,
     pub bones: RigPose,
-    #[serde(default = "default_bone_mask")]
-    pub bone_mask: u8,
+    #[serde(default = "default_bone_mask", deserialize_with = "deserialize_bone_mask")]
+    pub bone_mask: u16,
 }
 
 impl Keyframe {
     #[inline]
     pub fn has_bone(&self, bone_idx: usize) -> bool {
-        (self.bone_mask & (1u8 << bone_idx.min(BONE_COUNT - 1))) != 0
+        (self.bone_mask & (1u16 << bone_idx.min(BONE_COUNT - 1))) != 0
     }
 
     #[inline]
     pub fn set_bone(&mut self, bone_idx: usize, present: bool) {
-        let bit = 1u8 << bone_idx.min(BONE_COUNT - 1);
+        let bit = 1u16 << bone_idx.min(BONE_COUNT - 1);
         if present {
             self.bone_mask |= bit;
         } else {
@@ -743,19 +767,23 @@ pub fn create_blank_clip(seq: usize) -> ClipDef {
     }
 }
 
-pub fn snap_time_to_frame(time: f32, duration: f32) -> f32 {
+pub fn snap_time_to_fps(time: f32, duration: f32, fps: f32) -> f32 {
     let dur = duration.max(0.05);
-    let frames = (dur * 60.0).round().max(1.0);
+    let frames = (dur * fps.max(1.0)).round().max(1.0);
     let f_idx = ((time / dur).clamp(0.0, 1.0) * frames).round().clamp(0.0, frames);
     (f_idx / frames) * dur
 }
 
-/// Align every keyframe and impact marker strictly onto exact 60 FPS integer frame lines,
+pub fn snap_time_to_frame(time: f32, duration: f32) -> f32 {
+    snap_time_to_fps(time, duration, 60.0)
+}
+
+/// Align every keyframe and impact marker strictly onto exact `fps` integer frame lines,
 /// resolving dense keyframe collisions cleanly without stacking or losing bone data.
-pub fn snap_clip_to_frame_grid(clip: &mut ClipDef) {
+pub fn snap_clip_to_fps(clip: &mut ClipDef, fps: f32) {
     let dur = clip.duration.max(0.05);
     clip.duration = dur;
-    let frames = (dur * 60.0).round().max(1.0) as i32;
+    let frames = (dur * fps.max(1.0)).round().max(1.0) as i32;
     clip.keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
     let raw_frames: Vec<i32> = clip
         .keyframes
@@ -790,8 +818,12 @@ pub fn snap_clip_to_frame_grid(clip: &mut ClipDef) {
     }
     clip.keyframes = snapped.into_iter().map(|(_, k)| k).collect();
     if let Some(imp) = clip.impact_time {
-        clip.impact_time = Some(snap_time_to_frame(imp, dur));
+        clip.impact_time = Some(snap_time_to_fps(imp, dur, fps));
     }
+}
+
+pub fn snap_clip_to_frame_grid(clip: &mut ClipDef) {
+    snap_clip_to_fps(clip, 60.0);
 }
 
 pub fn prev_keyframe_time(clip: &ClipDef, t: f32) -> Option<f32> {
@@ -967,7 +999,7 @@ pub fn mirror_pose(src: &RigPose) -> RigPose {
         scale: b.scale,
     };
     let mut out = *src;
-    for idx in [0usize, 1, 2, 5] {
+    for idx in [0usize, 1, 2, 8] {
         out.0[idx] = flip(&src.0[idx]);
     }
     // Swap & mirror right/left limbs (3<->4 arms, 6<->7 legs)
@@ -975,6 +1007,12 @@ pub fn mirror_pose(src: &RigPose) -> RigPose {
     out.0[4] = flip(&src.0[3]);
     out.0[6] = flip(&src.0[7]);
     out.0[7] = flip(&src.0[6]);
+    if src.0[9].is_identity() {
+        out.0[5] = flip(&src.0[5]);
+    } else {
+        out.0[5] = flip(&src.0[9]);
+        out.0[9] = flip(&src.0[5]);
+    }
     out
 }
 

@@ -62,8 +62,12 @@ pub fn point_to_segment_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f3
     (px - qx).hypot(py - qy)
 }
 
-/// Return world pivot and normalized bone-local axis directions (for X/Y/Z handles).
-pub fn gizmo_axes_world(bone_world: Mat4, solo_weapon: bool) -> (Vec3, [Vec3; 3]) {
+/// Return world pivot and normalized axes (bone-local when `world_space == false`, world XYZ when `true`).
+pub fn gizmo_axes_for_space(
+    bone_world: Mat4,
+    solo_weapon: bool,
+    world_space: bool,
+) -> (Vec3, [Vec3; 3]) {
     let m = &bone_world.m;
     if solo_weapon {
         let mut x = Vec3::new(m[0], m[1], m[2]).norm();
@@ -75,11 +79,31 @@ pub fn gizmo_axes_world(bone_world: Mat4, solo_weapon: bool) -> (Vec3, [Vec3; 3]
         return (Vec3::new(0.0, 0.96, 0.0), [x, y, z]);
     }
     let pivot = bone_world.transform_point(Vec3::ZERO);
+    if world_space {
+        return (
+            pivot,
+            [
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ],
+        );
+    }
     // Notice bone_world includes mc_to_world (180deg X flip), so column dirs match MC bone axes directly
     let x = Vec3::new(m[0], m[1], m[2]).norm();
     let y = Vec3::new(m[4], m[5], m[6]).norm();
     let z = Vec3::new(m[8], m[9], m[10]).norm();
     (pivot, [x, y, z])
+}
+
+/// Return the normalized orthonormal basis of a parent world transform matrix.
+pub fn matrix_axes_world(parent_world: Mat4) -> [Vec3; 3] {
+    let m = &parent_world.m;
+    [
+        Vec3::new(m[0], m[1], m[2]).norm(),
+        Vec3::new(m[4], m[5], m[6]).norm(),
+        Vec3::new(m[8], m[9], m[10]).norm(),
+    ]
 }
 
 /// Pick hovered/clicked gizmo handle in screen pixels.
@@ -99,12 +123,12 @@ pub fn pick_gizmo_handle(
         return GizmoAxis::None;
     };
     let center_d = (mx - px).hypot(my - py);
-    if center_d <= 10.0 {
+    if center_d <= 18.0 {
         return GizmoAxis::Free;
     }
 
     let mut best_axis = GizmoAxis::None;
-    let mut best_d = 11.5f32;
+    let mut best_d = 10.5f32;
     let axis_ids = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
     for i in 0..3 {
         if let Some((tx, ty)) = project_to_screen(vp, pivot.add(axes[i].mul(axis_len_world)), vw, vh) {
@@ -124,6 +148,9 @@ pub fn pick_gizmo_handle(
         if (center_d - ring_px).abs() <= 9.0 {
             return GizmoAxis::Roll;
         }
+        if center_d < ring_px - 9.0 {
+            return GizmoAxis::Free;
+        }
     }
     GizmoAxis::None
 }
@@ -135,6 +162,8 @@ pub fn apply_gizmo_drag(
     tool: ToolMode,
     axis: GizmoAxis,
     axes: [Vec3; 3],
+    parent_axes: [Vec3; 3],
+    bone_axes: [Vec3; 3],
     cam_right: Vec3,
     cam_up: Vec3,
     cam_fwd: Vec3,
@@ -174,32 +203,32 @@ pub fn apply_gizmo_drag(
                     } else {
                         dx
                     };
-                    axes[ai].mul(sign_proj * 0.0055)
+                    axes[ai].mul(sign_proj * 0.0065)
                 }
-                _ => cam_right.mul(dx * 0.0042).add(cam_up.mul(-dy * 0.0042)),
+                _ => cam_right.mul(dx * 0.0052).add(cam_up.mul(-dy * 0.0052)),
             };
-            let px = world_delta.dot(axes[0]) * 16.0;
-            let py = -world_delta.dot(axes[1]) * 16.0; // bone_local uses base_y - pos[1], axes[1] points down in MC
-            let pz = world_delta.dot(axes[2]) * 16.0;
-            tr.pos[0] = (tr.pos[0] + px).clamp(-24.0, 24.0);
-            tr.pos[1] = (tr.pos[1] + py).clamp(-24.0, 24.0);
-            tr.pos[2] = (tr.pos[2] + pz).clamp(-24.0, 24.0);
+            let px = world_delta.dot(parent_axes[0]) * 16.0;
+            let py = -world_delta.dot(parent_axes[1]) * 16.0; // bone_local uses base_y - pos[1], axes[1] points down in MC
+            let pz = world_delta.dot(parent_axes[2]) * 16.0;
+            tr.pos[0] = (tr.pos[0] + px).clamp(-64.0, 64.0);
+            tr.pos[1] = (tr.pos[1] + py).clamp(-64.0, 64.0);
+            tr.pos[2] = (tr.pos[2] + pz).clamp(-64.0, 64.0);
         }
         ToolMode::Scale => {
             match axis {
-                GizmoAxis::X => tr.scale[0] = (tr.scale[0] * (1.0 + dx * 0.006 - dy * 0.004)).clamp(0.15, 3.0),
-                GizmoAxis::Y => tr.scale[1] = (tr.scale[1] * (1.0 - dy * 0.006)).clamp(0.15, 3.0),
-                GizmoAxis::Z => tr.scale[2] = (tr.scale[2] * (1.0 + dx * 0.006 + dy * 0.004)).clamp(0.15, 3.0),
+                GizmoAxis::X => tr.scale[0] = (tr.scale[0] * (1.0 + dx * 0.006 - dy * 0.004)).clamp(0.10, 4.0),
+                GizmoAxis::Y => tr.scale[1] = (tr.scale[1] * (1.0 - dy * 0.006)).clamp(0.10, 4.0),
+                GizmoAxis::Z => tr.scale[2] = (tr.scale[2] * (1.0 + dx * 0.006 + dy * 0.004)).clamp(0.10, 4.0),
                 _ => {
                     let factor = (1.0 + (dx - dy) * 0.005).clamp(0.85, 1.15);
                     for c in 0..3 {
-                        tr.scale[c] = (tr.scale[c] * factor).clamp(0.15, 3.0);
+                        tr.scale[c] = (tr.scale[c] * factor).clamp(0.10, 4.0);
                     }
                 }
             }
         }
         _ => {
-            // Rotate / Select-drag: camera-aligned arcball or exact axis spin
+            // Rotate / Select-drag: camera-aligned arcball or explicit axis spin
             match axis {
                 GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z => {
                     let ai = match axis {
@@ -230,12 +259,17 @@ pub fn apply_gizmo_drag(
                             let vx = tx - px;
                             let vy = ty - py;
                             let l = vx.hypot(vy).max(1.0);
-                            ((dx * vx + dy * vy) / l) * 0.68
+                            ((dx * vx + dy * vy) / l) * 0.72
                         } else {
                             (dx - dy) * 0.55
                         }
                     };
-                    tr.rot[ai] = (tr.rot[ai] + deg).clamp(-180.0, 180.0);
+                    for bi in 0..3 {
+                        let proj = a_vec.dot(bone_axes[bi]);
+                        if proj.abs() > 1e-4 {
+                            tr.rot[bi] = (tr.rot[bi] + deg * proj).clamp(-720.0, 720.0);
+                        }
+                    }
                 }
                 GizmoAxis::Roll => {
                     let deg = if let Some((px, py)) = project_to_screen(vp, pivot, vw, vh) {
@@ -250,16 +284,16 @@ pub fn apply_gizmo_drag(
                     };
                     let w_axis = cam_fwd.mul(-1.0);
                     for ai in 0..3 {
-                        let proj = w_axis.dot(axes[ai]);
-                        tr.rot[ai] = (tr.rot[ai] + deg * proj).clamp(-180.0, 180.0);
+                        let proj = w_axis.dot(bone_axes[ai]);
+                        tr.rot[ai] = (tr.rot[ai] + deg * proj).clamp(-720.0, 720.0);
                     }
                 }
                 _ => {
                     // Camera-relative free rotation: screen horizontal rotates around cam_up, screen vertical around cam_right
-                    let world_spin = cam_up.mul(dx * 0.62).add(cam_right.mul(dy * 0.62));
+                    let world_spin = cam_up.mul(dx * 0.65).add(cam_right.mul(dy * 0.65));
                     for ai in 0..3 {
-                        let d = world_spin.dot(axes[ai]);
-                        tr.rot[ai] = (tr.rot[ai] + d).clamp(-180.0, 180.0);
+                        let d = world_spin.dot(bone_axes[ai]);
+                        tr.rot[ai] = (tr.rot[ai] + d).clamp(-720.0, 720.0);
                     }
                 }
             }
@@ -468,37 +502,53 @@ fn bone_local(base_x: f32, base_y: f32, base_z: f32, p: &BoneTransform) -> Mat4 
         .mul(Mat4::scale(p.scale[0].max(0.05), p.scale[1].max(0.05), p.scale[2].max(0.05)))
 }
 
-/// Evaluate exact world matrices for all 8 bones matching standard virtual waist hierarchy.
+/// Evaluate exact world matrices for all 10 bones (`root` lifts/spins the whole character including legs).
 pub fn evaluate_rig_matrices(pose: &RigPose) -> [Mat4; BONE_COUNT] {
-    let root = mc_to_world();
+    let root_world = mc_to_world();
+    let root_mc = bone_local(0.0, 24.0, 0.0, pose.bone(8));
 
-    let waist_mc = bone_local(0.0, 12.0, 0.0, pose.bone(0));
+    let waist_mc = root_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(0)));
     let body_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(1)));
     let head_mc = waist_mc.mul(bone_local(0.0, -12.0, 0.0, pose.bone(2)));
     let right_arm_mc = waist_mc.mul(bone_local(-5.0, -10.0, 0.0, pose.bone(3)));
     let left_arm_mc = waist_mc.mul(bone_local(5.0, -10.0, 0.0, pose.bone(4)));
-    let right_leg_mc = bone_local(-1.9, 12.0, 0.0, pose.bone(6));
-    let left_leg_mc = bone_local(1.9, 12.0, 0.0, pose.bone(7));
+    let right_leg_mc = root_mc.mul(bone_local(-1.9, -12.0, 0.0, pose.bone(6)));
+    let left_leg_mc = root_mc.mul(bone_local(1.9, -12.0, 0.0, pose.bone(7)));
 
     let right_item_mc = right_arm_mc.mul(bone_local(-1.0, 9.0, -2.0, pose.bone(5)));
+    let left_item_mc = left_arm_mc.mul(bone_local(1.0, 9.0, -2.0, pose.bone(9)));
 
     [
-        root.mul(waist_mc),
-        root.mul(body_mc),
-        root.mul(head_mc),
-        root.mul(right_arm_mc),
-        root.mul(left_arm_mc),
-        root.mul(right_item_mc),
-        root.mul(right_leg_mc),
-        root.mul(left_leg_mc),
+        root_world.mul(waist_mc),
+        root_world.mul(body_mc),
+        root_world.mul(head_mc),
+        root_world.mul(right_arm_mc),
+        root_world.mul(left_arm_mc),
+        root_world.mul(right_item_mc),
+        root_world.mul(right_leg_mc),
+        root_world.mul(left_leg_mc),
+        root_world.mul(root_mc),
+        root_world.mul(left_item_mc),
     ]
+}
+
+/// Parent world matrix of any bone index in the 10-bone hierarchy (used for accurate World/Local translations).
+pub fn bone_parent_world_matrix(bone_idx: usize, mats: &[Mat4; BONE_COUNT]) -> Mat4 {
+    match bone_idx {
+        8 => mc_to_world(),
+        0 | 6 | 7 => mats[8],
+        1..=4 => mats[0],
+        5 => mats[3],
+        9 => mats[4],
+        _ => mats[8],
+    }
 }
 
 pub fn pick_bone_ray(
     nx: f32,
     ny: f32,
     inv_vp: Mat4,
-    mats: &[Mat4; 8],
+    mats: &[Mat4; BONE_COUNT],
     solo_weapon: bool,
 ) -> Option<usize> {
     pick_bone_ray_point(nx, ny, inv_vp, mats, solo_weapon).map(|(idx, _)| idx)
@@ -509,7 +559,7 @@ pub fn pick_bone_ray_point(
     nx: f32,
     ny: f32,
     inv_vp: Mat4,
-    mats: &[Mat4; 8],
+    mats: &[Mat4; BONE_COUNT],
     solo_weapon: bool,
 ) -> Option<(usize, Vec3)> {
     let p_near = inv_vp.transform_point(Vec3::new(nx, ny, 0.0));
@@ -523,21 +573,20 @@ pub fn pick_bone_ray_point(
         return Some((5, p_near.add(dir.mul(dist))));
     }
 
-    // Pick boxes in bone-local ModelPart pixel coordinates
-    let boxes: [(usize, [f32; 6]); 8] = [
+    // Pick boxes in bone-local ModelPart pixel coordinates (0..=7 primary limbs, 9 offhand, 8 root ground handle fallback)
+    let boxes: [(usize, [f32; 6]); 9] = [
         (0, [-4.3, -1.5, -2.4, 4.3, 1.5, 2.4]),     // waist
         (1, [-4.1, 0.0, -2.1, 4.1, 11.2, 2.1]),     // body
         (2, [-4.1, -8.1, -4.1, 4.1, 0.0, 4.1]),     // head
         (3, [-3.1, -2.0, -2.1, 1.1, 10.1, 2.1]),    // right_arm
         (4, [-1.1, -2.0, -2.1, 3.1, 10.1, 2.1]),    // left_arm
         (5, [-2.2, -5.0, -26.0, 2.2, 5.0, 6.0]),    // right_item weapon envelope
+        (9, [-2.2, -2.5, -8.0, 2.2, 2.5, 3.0]),     // left_item hand anchor
         (6, [-2.1, 0.0, -2.1, 2.1, 12.0, 2.1]),     // right_leg
         (7, [-2.1, 0.0, -2.1, 2.1, 12.0, 2.1]),     // left_leg
     ];
 
-    let mut best_idx = None;
-    let mut best_t = f32::INFINITY;
-    for &(idx, b) in &boxes {
+    let test_box = |idx: usize, b: [f32; 6]| -> Option<f32> {
         let inv = mats[idx].invert();
         let ro = inv.transform_point(p_near);
         let r1 = inv.transform_point(p_near.add(dir));
@@ -547,12 +596,10 @@ pub fn pick_bone_ray_point(
         let ros = [ro.x, ro.y, ro.z];
         let mut tmin = f32::NEG_INFINITY;
         let mut tmax = f32::INFINITY;
-        let mut hit = true;
         for i in 0..3 {
             if rds[i].abs() < 1e-6 {
                 if ros[i] < b[i] || ros[i] > b[i + 3] {
-                    hit = false;
-                    break;
+                    return None;
                 }
             } else {
                 let mut t1 = (b[i] - ros[i]) / rds[i];
@@ -563,14 +610,27 @@ pub fn pick_bone_ray_point(
                 tmin = tmin.max(t1);
                 tmax = tmax.min(t2);
                 if tmin > tmax {
-                    hit = false;
-                    break;
+                    return None;
                 }
             }
         }
-        if hit && tmax > 0.0 && tmin < best_t {
-            best_t = tmin.max(0.0);
-            best_idx = Some(idx);
+        (tmax > 0.0).then(|| tmin.max(0.0))
+    };
+
+    let mut best_idx = None;
+    let mut best_t = f32::INFINITY;
+    for &(idx, b) in &boxes {
+        if let Some(t) = test_box(idx, b) {
+            if t < best_t {
+                best_t = t;
+                best_idx = Some(idx);
+            }
+        }
+    }
+    if best_idx.is_none() {
+        if let Some(t) = test_box(8, [-7.0, -1.6, -7.0, 7.0, 0.4, 7.0]) {
+            best_t = t;
+            best_idx = Some(8);
         }
     }
     best_idx.map(|idx| (idx, p_near.add(dir.mul(best_t))))

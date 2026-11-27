@@ -138,8 +138,8 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
             base_dark = vec3<f32>(0.024, 0.026, 0.031);
             core_glow = vec3<f32>(0.056, 0.060, 0.072);
         } else if (is_daylight) {
-            base_dark = vec3<f32>(0.165, 0.180, 0.212);
-            core_glow = vec3<f32>(0.255, 0.282, 0.330);
+            base_dark = vec3<f32>(0.73, 0.76, 0.81);
+            core_glow = vec3<f32>(0.88, 0.90, 0.94);
         } else if (is_blueprint) {
             base_dark = vec3<f32>(0.028, 0.068, 0.140);
             core_glow = vec3<f32>(0.060, 0.138, 0.258);
@@ -176,10 +176,10 @@ fn fs_bg(in: BgOut) -> @location(0) vec4<f32> {
                 minor_alpha = 0.30;
                 major_alpha = 0.52;
             } else if (is_daylight) {
-                grid_col_minor = vec3<f32>(0.30, 0.33, 0.38);
-                grid_col_major = vec3<f32>(0.24, 0.44, 0.74);
-                minor_alpha = 0.30;
-                major_alpha = 0.46;
+                grid_col_minor = vec3<f32>(0.55, 0.59, 0.66);
+                grid_col_major = vec3<f32>(0.26, 0.46, 0.78);
+                minor_alpha = 0.24;
+                major_alpha = 0.38;
             } else if (is_blueprint) {
                 grid_col_minor = vec3<f32>(0.09, 0.24, 0.46);
                 grid_col_major = vec3<f32>(0.22, 0.68, 0.96);

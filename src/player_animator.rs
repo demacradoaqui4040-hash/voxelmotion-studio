@@ -24,6 +24,8 @@ fn mc_part_base_pose(pa_bone: &str) -> Option<(usize, [f32; 3])> {
         "rightItem" | "right_item" => Some((5, [0.0, 0.0, 0.0])),
         "rightLeg" | "right_leg" => Some((6, [-1.9, 12.0, 0.0])),
         "leftLeg" | "left_leg" => Some((7, [1.9, 12.0, 0.0])),
+        "root" => Some((8, [0.0, 0.0, 0.0])),
+        "leftItem" | "left_item" => Some((9, [0.0, 0.0, 0.0])),
         _ => None,
     }
 }
@@ -264,6 +266,8 @@ pub fn parse_player_animator_json(
         [0.0, 0.0, 0.0],   // 5: rightItem
         [-1.9, 12.0, 0.0], // 6: rightLeg
         [1.9, 12.0, 0.0],  // 7: leftLeg
+        [0.0, 0.0, 0.0],   // 8: root
+        [0.0, 0.0, 0.0],   // 9: leftItem
     ];
     let mut pa_rot_deg: [[f32; 3]; BONE_COUNT] = [[0.0; 3]; BONE_COUNT];
     let mut prev_out_pose = RigPose::ZERO;
@@ -344,20 +348,26 @@ pub fn parse_player_animator_json(
             };
         }
 
-        // 5: `rightItem` (HeldItemMixin inside Vanilla `RotX(-90) * RotY(180)`):
-        //   - `pos` mapped via `R_hand`: `(-hx, +hz, -hy)` in Bedrock right_arm space
+        // 5 & 9: `rightItem` & `leftItem` (HeldItemMixin inside Vanilla `RotX(-90) * RotY(180)`):
+        //   - `pos` mapped via `R_hand`: `(-hx, +hz, -hy)` in Bedrock item space
         //   - `rot` conjugated `R_hand * R_pa * R_hand^-1`
-        let item_r_conj = mul3(r_hand, mul3(rot_zyx_deg3(pa_rot_deg[5]), r_hand_inv));
-        let item_euler = euler_zyx_deg_from_mat3(item_r_conj);
-        *out_pose.bone_mut(5) = BoneTransform {
-            pos: [-pa_pos[5][0], pa_pos[5][2], -pa_pos[5][1]],
-            rot: [
-                unwrap_deg_near(prev_out_pose.bone(5).rot[0], item_euler[0]),
-                unwrap_deg_near(prev_out_pose.bone(5).rot[1], item_euler[1]),
-                unwrap_deg_near(prev_out_pose.bone(5).rot[2], item_euler[2]),
-            ],
-            ..BoneTransform::IDENTITY
-        };
+        for item_idx in [5usize, 9usize] {
+            let item_r_conj = mul3(r_hand, mul3(rot_zyx_deg3(pa_rot_deg[item_idx]), r_hand_inv));
+            let item_euler = euler_zyx_deg_from_mat3(item_r_conj);
+            *out_pose.bone_mut(item_idx) = BoneTransform {
+                pos: [
+                    -pa_pos[item_idx][0],
+                    pa_pos[item_idx][2],
+                    -pa_pos[item_idx][1],
+                ],
+                rot: [
+                    unwrap_deg_near(prev_out_pose.bone(item_idx).rot[0], item_euler[0]),
+                    unwrap_deg_near(prev_out_pose.bone(item_idx).rot[1], item_euler[1]),
+                    unwrap_deg_near(prev_out_pose.bone(item_idx).rot[2], item_euler[2]),
+                ],
+                ..BoneTransform::IDENTITY
+            };
+        }
 
         // 6 & 7: `rightLeg` & `leftLeg`:
         //   PlayerRendererMixin rotates legs together with `body`, while Bedrock 1.8.0 / CombatPoseAnimator

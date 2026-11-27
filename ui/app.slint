@@ -78,6 +78,19 @@ export struct GalleryItem {
     active: bool,
 }
 
+export struct GalleryRow {
+    is_header: bool,
+    y_px: float,
+    h_px: float,
+    group_idx: int,
+    header_title: string,
+    group_count: int,
+    collapsed: bool,
+    left: GalleryItem,
+    has_right: bool,
+    right: GalleryItem,
+}
+
 export struct VfxEventItem {
     index: int,
     time_text: string,
@@ -110,6 +123,76 @@ export struct TimelineDiamond {
     dot_color: color,
 }
 
+component ClipThumbCard inherits TouchArea {
+    in property <GalleryItem> item;
+    width: 108px;
+    height: 96px;
+    mouse-cursor: pointer;
+
+    Rectangle {
+        border-radius: max(Theme.radius-control, 8px);
+        background: root.item.active
+            ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
+            : (root.has-hover ? Theme.bg-hover : (Theme.wireframe-controls ? transparent : Theme.bg-elevated));
+        border-width: root.item.active ? 1.5px : 1px;
+        border-color: root.item.active
+            ? (root.item.compatible ? Theme.accent : Theme.gold)
+            : (root.has-hover ? Theme.border-specular : Theme.border-control);
+        animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
+
+        VerticalLayout {
+            padding: 5px;
+            spacing: 3px;
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                border-radius: 5px;
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.item.thumb;
+                    image-fit: contain;
+                }
+                if root.has-hover && root.item.source_label != "" : Rectangle {
+                    x: 2px;
+                    y: 2px;
+                    width: 34px;
+                    height: 14px;
+                    border-radius: 4px;
+                    background: Theme.bg-toast;
+                    Text {
+                        text: root.item.source_label;
+                        color: #ffffff;
+                        font-family: Theme.font-mono;
+                        font-size: 9px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.item.status_idx > 0 : Rectangle {
+                    x: parent.width - 10px;
+                    y: 3px;
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: root.item.status_idx == 1 ? Theme.green : (root.item.status_idx == 2 ? Theme.gold : Theme.axis-x);
+                    border-width: 1px;
+                    border-color: Theme.bg-shell;
+                }
+            }
+            Text {
+                text: root.item.name;
+                color: root.item.active ? Theme.text-primary : Theme.text-secondary;
+                font-size: Theme.fs-meta;
+                font-weight: root.item.active ? 600 : 500;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "VoxelMotion Studio";
     no-frame: true;
@@ -122,6 +205,14 @@ export component MainWindow inherits Window {
     default-font-size: Theme.fs-body;
 
     // Chrome & Popovers / Modals (Single Unified Workspace: DEC-01)
+    in-out property <string> tip-text: "";
+    in-out property <length> tip-x: 0px;
+    in-out property <length> tip-y: 0px;
+    function set-tip(show: bool, txt: string, tx: length, ty: length) {
+        root.tip-text = show ? txt : "";
+        root.tip-x = tx;
+        root.tip-y = ty;
+    }
     in-out property <bool> is-maximized: false;
     in-out property <bool> has-unsaved: false;
     in-out property <bool> can-undo: false;
@@ -160,13 +251,27 @@ export component MainWindow inherits Window {
     callback cycle-weapon(int);
     callback import-custom-weapons();
 
+    // Character Skin State & Actions
+    in-out property <bool> has-custom-skin: false;
+    in-out property <string> skin-label: "Skin: Modelo base";
+    in-out property <bool> skin-slim: false;
+    in-out property <bool> skin-outer-layer: true;
+    callback load-skin-action();
+    callback reset-skin-action();
+    callback toggle-skin-slim(bool);
+    callback toggle-skin-outer-layer(bool);
+
     // Main 3D Viewport State & Interactions
     in-out property <image> main-viewport;
     in-out property <string> active-clip-name: "Nueva Acción";
     in-out property <int> active-tool: 1; // 1 Rotate, 2 Scale, 4 Move
     in-out property <bool> show-gizmo: true;
+    in-out property <bool> gizmo-world-space: true;
+    in-out property <bool> show-offhand-weapon: false;
     callback select-tool(int);
     callback toggle-gizmo();
+    callback toggle-gizmo-space();
+    callback toggle-offhand-weapon(bool);
     callback toggle-solo-weapon();
     callback rename-clip(string);
     in-out property <bool> solo-weapon: false;
@@ -251,6 +356,9 @@ export component MainWindow inherits Window {
     in-out property <image> lanes-grid-img;
     in-out property <bool> show-all-bones: false;
     in-out property <bool> timeline-bone-scope: true;
+    in-out property <int> timeline-fps: 20;
+    in-out property <float> clip-end-frac: 1.0;
+    in-out property <bool> timeline-scrollable: false;
     in-out property <string> timeline-zoom-label: "1.0x";
     in-out property <bool> timeline-zoomed: false;
     in-out property <float> timeline-view-start: 0.0;
@@ -278,6 +386,10 @@ export component MainWindow inherits Window {
     callback pan-timeline(float);
     callback set-timeline-view-start(float);
     callback set-timeline-bone-scope(bool);
+    callback set-timeline-fps(int);
+    callback pack-keyframes-action();
+    callback spread-keyframes-action();
+    callback nudge-keyframes-action(int);
     callback copy-timeline-action();
     callback paste-timeline-action();
     callback copy-bone-action(bool);
@@ -298,9 +410,12 @@ export component MainWindow inherits Window {
     in-out property <string> gallery-search: "";
     in-out property <int> gallery-filter: 0;
     in-out property <[GalleryItem]> gallery-items: [];
+    in-out property <[GalleryRow]> gallery-rows: [];
+    in-out property <float> gallery-content-h: 400.0;
     in-out property <string> featured-gallery-id: "action_1";
     in-out property <string> featured-gallery-name: "Nueva Acción";
     in-out property <image> featured-gallery-thumb;
+    callback toggle-gallery-group(int);
     callback filter-gallery(int);
     callback search-gallery(string);
     callback select-gallery-item(string);
@@ -525,11 +640,12 @@ export component MainWindow inherits Window {
                         double-clicked => { root.win-maximize(); }
                     }
 
-                    // Left: Archivo menu trigger with clean geometric AppLogoMark
+                    // Left: Archivo menu + Undo/Redo quick history buttons
                     HorizontalLayout {
                         x: 8px;
                         y: 0px;
                         height: 36px;
+                        spacing: 4px;
                         alignment: start;
 
                         file-ta := TouchArea {
@@ -574,6 +690,25 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
+                        }
+
+                        Rectangle { width: 1px; height: 14px; y: 11px; background: Theme.divider; }
+
+                        IconActionBtn {
+                            y: 5px;
+                            disabled: !root.can-undo;
+                            tip: "Deshacer · Ctrl+Z";
+                            hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
+                            path-cmd: "M3 7 V13 H9 M21 17 A9 9 0 0 0 6 10.3 L3 13";
+                            clicked => { if (root.can-undo) { root.undo-action(); } }
+                        }
+                        IconActionBtn {
+                            y: 5px;
+                            disabled: !root.can-redo;
+                            tip: "Rehacer · Ctrl+Y";
+                            hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
+                            path-cmd: "M21 7 V13 H15 M3 17 A9 9 0 0 1 18 10.3 L21 13";
+                            clicked => { if (root.can-redo) { root.redo-action(); } }
                         }
                     }
 
@@ -905,76 +1040,82 @@ export component MainWindow inherits Window {
                                         }
                                     }
 
-                                    // 2-Column Vertical Clip Thumbnail Grid
+                                    // Collapsible Categorized 2-Column Clip Gallery
                                     Flickable {
                                         vertical-stretch: 1;
                                         interactive: true;
-                                        content-height: max(self.height, ceil(root.gallery-items.length / 2) * 102px + 4px);
+                                        content-height: max(self.height, root.gallery-content-h * 1px);
 
-                                        for item[gi] in root.gallery-items : TouchArea {
-                                            x: mod(gi, 2) * 112px;
-                                            y: floor(gi / 2) * 102px;
-                                            width: 108px;
-                                            height: 96px;
-                                            mouse-cursor: pointer;
-                                            clicked => { root.select-gallery-item(item.id); }
+                                        for row in root.gallery-rows : Rectangle {
+                                            x: 0px;
+                                            y: row.y_px * 1px;
+                                            width: parent.width;
+                                            height: row.h_px * 1px;
 
-                                            Rectangle {
-                                                border-radius: Theme.radius-control;
-                                                background: item.active
-                                                    ? (Theme.wireframe-controls ? Theme.accent-soft : Theme.bg-active)
-                                                    : (parent.has-hover ? Theme.bg-hover : (Theme.wireframe-controls ? transparent : Theme.bg-elevated));
-                                                border-width: 1px;
-                                                border-color: item.active
-                                                    ? (item.compatible ? Theme.accent : Theme.gold)
-                                                    : (parent.has-hover ? Theme.border-specular : Theme.border-control);
-                                                animate background { duration: Theme.dur-effects; easing: cubic-bezier(0, 0, 0, 1); }
-
-                                                VerticalLayout {
-                                                    padding: 4px;
-                                                    spacing: 3px;
+                                            if row.is_header : TouchArea {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                mouse-cursor: pointer;
+                                                clicked => { root.toggle-gallery-group(row.group_idx); }
+                                                Rectangle {
+                                                    border-radius: Theme.radius-control;
+                                                    background: parent.has-hover ? Theme.bg-hover : transparent;
                                                     HorizontalLayout {
+                                                        padding-left: 4px;
+                                                        padding-right: 4px;
+                                                        spacing: 5px;
                                                         alignment: space-between;
+                                                        HorizontalLayout {
+                                                            spacing: 5px;
+                                                            VectorIcon {
+                                                                y: 7px;
+                                                                size: 11px;
+                                                                icon-color: Theme.text-dim;
+                                                                commands: row.collapsed ? "M9 6 L15 12 L9 18" : "M6 9 L12 15 L18 9";
+                                                            }
+                                                            Text {
+                                                                text: row.header_title;
+                                                                color: Theme.text-secondary;
+                                                                font-family: Theme.mono-headers ? Theme.font-mono : Theme.font-ui;
+                                                                font-size: Theme.fs-meta;
+                                                                font-weight: 700;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
                                                         Text {
-                                                            text: item.source_label;
+                                                            text: row.group_count;
                                                             color: Theme.text-dim;
                                                             font-family: Theme.font-mono;
                                                             font-size: Theme.fs-meta;
+                                                            vertical-alignment: center;
                                                         }
-                                                        if item.status_tag != "" : Text {
-                                                            text: item.status_tag;
-                                                            font-family: Theme.font-mono;
-                                                            font-size: Theme.fs-meta;
-                                                            font-weight: 700;
-                                                            color: item.status_idx == 1 ? Theme.green : (item.status_idx == 2 ? Theme.gold : Theme.axis-x);
-                                                        }
-                                                    }
-                                                    Image {
-                                                        vertical-stretch: 1;
-                                                        source: item.thumb;
-                                                        image-fit: contain;
-                                                    }
-                                                    Text {
-                                                        text: item.name;
-                                                        color: item.active ? Theme.text-primary : Theme.text-secondary;
-                                                        font-size: Theme.fs-meta;
-                                                        font-weight: item.active ? 600 : 500;
-                                                        horizontal-alignment: center;
-                                                        overflow: elide;
                                                     }
                                                 }
+                                            }
+
+                                            if !row.is_header : ClipThumbCard {
+                                                x: 0px;
+                                                y: 0px;
+                                                item: row.left;
+                                                clicked => { root.select-gallery-item(row.left.id); }
+                                            }
+                                            if !row.is_header && row.has_right : ClipThumbCard {
+                                                x: 112px;
+                                                y: 0px;
+                                                item: row.right;
+                                                clicked => { root.select-gallery-item(row.right.id); }
                                             }
                                         }
                                     }
 
                                     Hairline { }
 
-                                    // Clean Curation Footer for Selected Clip (full words)
+                                    // Clean Curation Footer: single primary blue CTA + secondary + discreet danger
                                     HorizontalLayout {
                                         spacing: 4px;
-                                        StudioButton { horizontal-stretch: 1; compact: true; ghost: true; label: "Aprobar"; active: root.active-clip-status == 1; clicked => { root.set-clip-status(root.featured-gallery-id, 1); } }
-                                        StudioButton { horizontal-stretch: 1; compact: true; ghost: true; label: "Mejorar"; active: root.active-clip-status == 2; clicked => { root.set-clip-status(root.featured-gallery-id, 2); } }
-                                        StudioButton { width: 66px; compact: true; ghost: true; label: "Descartar"; active: root.active-clip-status == 3; clicked => { root.set-clip-status(root.featured-gallery-id, 3); } }
+                                        StudioButton { horizontal-stretch: 1; compact: true; primary: true; label: root.active-clip-status == 1 ? "✓ Aprobada" : "Aprobar"; clicked => { root.set-clip-status(root.featured-gallery-id, 1); } }
+                                        StudioButton { width: 66px; compact: true; label: "Mejorar"; active: root.active-clip-status == 2; clicked => { root.set-clip-status(root.featured-gallery-id, 2); } }
+                                        StudioButton { width: 62px; compact: true; ghost: true; danger: true; label: "Descartar"; active: root.active-clip-status == 3; clicked => { root.set-clip-status(root.featured-gallery-id, 3); } }
                                     }
                                 }
 
@@ -1138,14 +1279,17 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            // Top-Left Tool Rail: Move, Rotate, Scale + Hide/Show Gizmo (DEC-11)
+                            // Top-Left Tool Rail: Move, Rotate, Scale + Gizmo + World/Local Space (DEC-11)
                             Rectangle {
                                 x: 12px;
                                 y: 12px;
                                 width: 36px;
-                                height: 132px;
+                                height: 164px;
                                 border-radius: Theme.radius-overlay;
                                 background: Theme.bg-popover;
+                                drop-shadow-blur: 14px;
+                                drop-shadow-color: #0000002e;
+                                drop-shadow-offset-y: 3px;
                                 border-width: 1px;
                                 border-color: Theme.border-control;
 
@@ -1154,18 +1298,24 @@ export component MainWindow inherits Window {
                                     spacing: 4px;
                                     // Mover (tool 4)
                                     ToolRailBtn {
+                                        tip: "Mover · G / 5";
+                                        hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
                                         path-cmd: "M5 9 L2 12 L5 15 M9 5 L12 2 L15 5 M15 19 L12 22 L9 19 M19 9 L22 12 L19 15 M2 12 H22 M12 2 V22";
                                         active: root.active-tool == 4;
                                         clicked => { root.active-tool = 4; root.select-tool(4); }
                                     }
                                     // Rotar (tool 1)
                                     ToolRailBtn {
+                                        tip: "Rotar · T / 2";
+                                        hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
                                         path-cmd: "M21 12 A9 9 0 1 1 18.36 5.64 L21 8 M21 3 V8 H16";
                                         active: root.active-tool == 1;
                                         clicked => { root.active-tool = 1; root.select-tool(1); }
                                     }
                                     // Escalar (tool 2)
                                     ToolRailBtn {
+                                        tip: "Escalar · X / 3";
+                                        hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
                                         path-cmd: "M15 3 H21 V9 M9 21 H3 V15 M21 3 L14 10 M3 21 L10 14";
                                         active: root.active-tool == 2;
                                         clicked => { root.active-tool = 2; root.select-tool(2); }
@@ -1173,9 +1323,19 @@ export component MainWindow inherits Window {
                                     Hairline { }
                                     // Toggle Gizmo visibility cleanly without mode traps
                                     ToolRailBtn {
+                                        tip: "Mostrar/Ocultar Gizmo";
+                                        hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
                                         path-cmd: "M2 12 S5.5 5 12 5 S22 12 22 12 S18.5 19 12 19 S2 12 2 12 Z M12 9 A3 3 0 1 0 12 15 A3 3 0 1 0 12 9 Z";
                                         active: !root.show-gizmo;
                                         clicked => { root.toggle-gizmo(); }
+                                    }
+                                    // Toggle Gizmo World vs Local Space (L)
+                                    ToolRailBtn {
+                                        tip: root.gizmo-world-space ? "Espacio: Mundo · L" : "Espacio: Local · L";
+                                        hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); }
+                                        path-cmd: "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 Z M2 12 H22 M12 2 A15 15 0 0 1 12 22 M12 2 A15 15 0 0 0 12 22";
+                                        active: root.gizmo-world-space;
+                                        clicked => { root.toggle-gizmo-space(); }
                                     }
                                 }
                             }
@@ -1188,6 +1348,9 @@ export component MainWindow inherits Window {
                                 height: 32px;
                                 border-radius: Theme.radius-overlay;
                                 background: Theme.bg-popover;
+                                drop-shadow-blur: 14px;
+                                drop-shadow-color: #0000002e;
+                                drop-shadow-offset-y: 3px;
                                 border-width: 1px;
                                 border-color: Theme.border-control;
 
@@ -1305,6 +1468,9 @@ export component MainWindow inherits Window {
                                 height: 34px;
                                 border-radius: Theme.radius-overlay;
                                 background: Theme.bg-popover;
+                                drop-shadow-blur: 14px;
+                                drop-shadow-color: #0000002e;
+                                drop-shadow-offset-y: 3px;
                                 border-width: 1px;
                                 border-color: Theme.border-control;
 
@@ -1397,18 +1563,18 @@ export component MainWindow inherits Window {
                                         width: parent.width;
                                         alignment: start;
                                         padding: 12px;
-                                        spacing: 11px;
+                                        spacing: 8px;
 
-                                        // 1. Direct 8-Bone Skeleton List (no extra tab, zero box nesting)
+                                        // 1. Direct 10-Bone Skeleton List (zero box nesting)
                                         VerticalLayout {
-                                            spacing: 3px;
+                                            spacing: 2px;
                                             HorizontalLayout {
                                                 alignment: space-between;
                                                 SectionLabel { text: Theme.mono-headers ? "ESQUELETO" : "Esqueleto"; vertical-alignment: center; }
                                                 StudioButton { width: 72px; compact: true; ghost: true; label: "Ver todos"; clicked => { root.show-all-bones-reset(); } }
                                             }
                                             for b in root.all-bones-tracks : TouchArea {
-                                                height: 22px;
+                                                height: 19px;
                                                 mouse-cursor: pointer;
                                                 clicked => { root.select-bone-idx(b.bone_idx); }
                                                 Rectangle {
@@ -1416,7 +1582,7 @@ export component MainWindow inherits Window {
                                                     background: b.active ? Theme.bg-active : (parent.has-hover ? Theme.bg-hover : transparent);
                                                     HorizontalLayout {
                                                         padding-left: 8px; padding-right: 4px; spacing: 8px;
-                                                        Rectangle { width: 6px; height: 6px; y: 8px; border-radius: 3px; background: b.dot_color; }
+                                                        Rectangle { width: 6px; height: 6px; y: 6.5px; border-radius: 3px; background: b.dot_color; }
                                                         Text {
                                                             text: b.name;
                                                             color: b.active ? Theme.text-primary : (b.visible ? Theme.text-secondary : Theme.text-dim);
@@ -1426,7 +1592,7 @@ export component MainWindow inherits Window {
                                                             horizontal-stretch: 1;
                                                         }
                                                         IconActionBtn {
-                                                            width: 22px; height: 22px; icon-size: 13px;
+                                                            width: 19px; height: 19px; icon-size: 12px;
                                                             path-cmd: b.visible
                                                                 ? "M2 12 S5.5 5 12 5 S22 12 22 12 S18.5 19 12 19 S2 12 2 12 Z M12 9 A3 3 0 1 0 12 15 A3 3 0 1 0 12 9 Z"
                                                                 : "M17.94 17.94 A10.07 10.07 0 0 1 12 20 C5 20 1 12 1 12 A18.45 18.45 0 0 1 5.06 5.94 M9.9 4.24 A9.12 9.12 0 0 1 12 4 C19 4 23 12 23 12 A18.5 18.5 0 0 1 20.84 15.17 M1 1 L23 23";
@@ -1447,10 +1613,10 @@ export component MainWindow inherits Window {
                                                 Text { text: root.active-bone-name; color: Theme.text-primary; font-size: Theme.fs-title; font-weight: 600; vertical-alignment: center; overflow: elide; }
                                                 HorizontalLayout {
                                                     spacing: 2px;
-                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; path-cmd: "M9 9 H20 V20 H9 Z M5 15 H4 A2 2 0 0 1 2 13 V4 A2 2 0 0 1 4 2 H13 A2 2 0 0 1 15 4 V5"; clicked => { root.copy-bone-action(false); } }
-                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; active: root.bone-clipboard-count > 0; path-cmd: "M16 4 H18 A2 2 0 0 1 20 6 V20 A2 2 0 0 1 18 22 H6 A2 2 0 0 1 4 20 V6 A2 2 0 0 1 6 4 H8 M8 2 H16 V6 H8 Z"; clicked => { root.paste-bone-action(false); } }
-                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; path-cmd: "M8 3 H5 A2 2 0 0 0 3 5 V19 A2 2 0 0 0 5 21 H8 M16 3 H19 A2 2 0 0 1 21 5 V19 A2 2 0 0 1 19 21 H16 M12 20 V4"; clicked => { root.mirror-pose-action(); } }
-                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; path-cmd: "M3 12 A9 9 0 1 0 5.64 5.64 L3 8 M3 3 V8 H8"; clicked => { root.reset-pose-action(); } }
+                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Copiar hueso · Ctrl+C"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M9 9 H20 V20 H9 Z M5 15 H4 A2 2 0 0 1 2 13 V4 A2 2 0 0 1 4 2 H13 A2 2 0 0 1 15 4 V5"; clicked => { root.copy-bone-action(false); } }
+                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; active: root.bone-clipboard-count > 0; tip: "Pegar hueso · Ctrl+V"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M16 4 H18 A2 2 0 0 1 20 6 V20 A2 2 0 0 1 18 22 H6 A2 2 0 0 1 4 20 V6 A2 2 0 0 1 6 4 H8 M8 2 H16 V6 H8 Z"; clicked => { root.paste-bone-action(false); } }
+                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Espejar pose · M"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M8 3 H5 A2 2 0 0 0 3 5 V19 A2 2 0 0 0 5 21 H8 M16 3 H19 A2 2 0 0 1 21 5 V19 A2 2 0 0 1 19 21 H16 M12 20 V4"; clicked => { root.mirror-pose-action(); } }
+                                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Resetear hueso"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M3 12 A9 9 0 1 0 5.64 5.64 L3 8 M3 3 V8 H8"; clicked => { root.reset-pose-action(); } }
                                                 }
                                             }
                                             VerticalLayout {
@@ -1489,7 +1655,7 @@ export component MainWindow inherits Window {
 
                                         // 3. Animation Timing & Easing
                                         VerticalLayout {
-                                            spacing: 8px;
+                                            spacing: 6px;
                                             SectionLabel { text: Theme.mono-headers ? "ANIMACIÓN" : "Animación"; }
                                             HorizontalLayout {
                                                 alignment: space-between;
@@ -1498,38 +1664,142 @@ export component MainWindow inherits Window {
                                             }
                                             HorizontalLayout {
                                                 alignment: space-between;
-                                                Text { text: "Duración"; color: Theme.text-secondary; font-size: Theme.fs-body; vertical-alignment: center; }
-                                                HorizontalLayout {
-                                                    spacing: 4px;
-                                                    StudioButton { width: 24px; compact: true; ghost: true; label: "-"; clicked => { root.set-clip-frames(root.total-frames - 1); } }
-                                                    Rectangle {
-                                                        width: 82px; height: 24px; border-radius: Theme.radius-control;
-                                                        background: Theme.wireframe-controls ? transparent : Theme.bg-input;
-                                                        border-width: 1px; border-color: Theme.border-control;
-                                                        Text { text: root.total-frames + "f · " + root.duration-text + "s"; color: Theme.text-primary; font-family: Theme.font-mono; font-size: Theme.fs-meta; horizontal-alignment: center; vertical-alignment: center; }
+                                                Text { text: "Grilla FPS"; color: Theme.text-secondary; font-size: Theme.fs-body; vertical-alignment: center; }
+                                                Rectangle {
+                                                    width: 152px;
+                                                    height: 24px;
+                                                    border-radius: Theme.radius-control;
+                                                    background: Theme.bg-input;
+                                                    border-width: 1px;
+                                                    border-color: Theme.border-control;
+                                                    HorizontalLayout {
+                                                        padding: 2px;
+                                                        spacing: 2px;
+                                                        for fps-opt in [20, 30, 60] : TouchArea {
+                                                            horizontal-stretch: 1;
+                                                            mouse-cursor: pointer;
+                                                            clicked => { root.set-timeline-fps(fps-opt); }
+                                                            Rectangle {
+                                                                border-radius: max(0px, Theme.radius-control - 1px);
+                                                                background: root.timeline-fps == fps-opt ? Theme.accent-soft : (parent.has-hover ? Theme.bg-hover : transparent);
+                                                                border-width: root.timeline-fps == fps-opt ? 1px : 0px;
+                                                                border-color: Theme.accent;
+                                                                Text {
+                                                                    text: fps-opt + " fps";
+                                                                    color: root.timeline-fps == fps-opt ? Theme.accent : Theme.text-secondary;
+                                                                    font-family: Theme.font-mono;
+                                                                    font-size: Theme.fs-meta;
+                                                                    font-weight: root.timeline-fps == fps-opt ? 700 : 500;
+                                                                    horizontal-alignment: center;
+                                                                    vertical-alignment: center;
+                                                                }
+                                                            }
+                                                        }
                                                     }
-                                                    StudioButton { width: 24px; compact: true; ghost: true; label: "+"; clicked => { root.set-clip-frames(root.total-frames + 1); } }
                                                 }
                                             }
                                             HorizontalLayout {
-                                                spacing: 3px;
-                                                for fc in [15, 30, 60, 90, 120] : StudioButton {
-                                                    compact: true;
-                                                    horizontal-stretch: 1;
-                                                    mono: true;
-                                                    label: fc + "f";
-                                                    active: root.total-frames == fc;
-                                                    clicked => { root.set-clip-frames(fc); }
+                                                alignment: space-between;
+                                                Text { text: "Duración"; color: Theme.text-secondary; font-size: Theme.fs-body; vertical-alignment: center; }
+                                                Rectangle {
+                                                    width: 136px;
+                                                    height: 24px;
+                                                    border-radius: Theme.radius-control;
+                                                    background: Theme.bg-input;
+                                                    border-width: 1px;
+                                                    border-color: Theme.border-control;
+                                                    HorizontalLayout {
+                                                        padding: 2px;
+                                                        spacing: 2px;
+                                                        StudioButton { width: 22px; height: 20px; compact: true; ghost: true; label: "-"; clicked => { root.set-clip-frames(root.total-frames - 1); } }
+                                                        Text { horizontal-stretch: 1; text: root.total-frames + "f · " + root.duration-text + "s"; color: Theme.text-primary; font-family: Theme.font-mono; font-size: Theme.fs-meta; horizontal-alignment: center; vertical-alignment: center; }
+                                                        StudioButton { width: 22px; height: 20px; compact: true; ghost: true; label: "+"; clicked => { root.set-clip-frames(root.total-frames + 1); } }
+                                                    }
                                                 }
                                             }
-                                            HorizontalLayout {
-                                                spacing: 3px;
-                                                for e[ei] in ["Snap", "Peso", "Suave", "Lineal"] : StudioButton {
-                                                    compact: true;
-                                                    horizontal-stretch: 1;
-                                                    label: e;
-                                                    active: root.easing-idx == ei;
-                                                    clicked => { root.set-easing(ei); }
+                                            Rectangle {
+                                                height: 24px;
+                                                border-radius: Theme.radius-control;
+                                                background: Theme.bg-input;
+                                                border-width: 1px;
+                                                border-color: Theme.border-control;
+                                                HorizontalLayout {
+                                                    padding: 2px;
+                                                    spacing: 2px;
+                                                    for fc in [10, 15, 20, 30, 60] : TouchArea {
+                                                        horizontal-stretch: 1;
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.set-clip-frames(fc); }
+                                                        Rectangle {
+                                                            border-radius: max(0px, Theme.radius-control - 1px);
+                                                            background: root.total-frames == fc ? Theme.accent-soft : (parent.has-hover ? Theme.bg-hover : transparent);
+                                                            border-width: root.total-frames == fc ? 1px : 0px;
+                                                            border-color: Theme.accent;
+                                                            Text {
+                                                                text: fc + "f";
+                                                                color: root.total-frames == fc ? Theme.accent : Theme.text-secondary;
+                                                                font-family: Theme.font-mono;
+                                                                font-size: Theme.fs-meta;
+                                                                font-weight: root.total-frames == fc ? 700 : 500;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Rectangle {
+                                                height: 36px;
+                                                border-radius: Theme.radius-control;
+                                                background: Theme.bg-input;
+                                                border-width: 1px;
+                                                border-color: Theme.border-control;
+                                                HorizontalLayout {
+                                                    padding: 2px;
+                                                    spacing: 2px;
+                                                    for ev[ei] in [
+                                                        { lbl: "Snap", path: "M2 12 C9 12 8 2 22 2" },
+                                                        { lbl: "Peso", path: "M2 12 C4 3 12 2 22 2" },
+                                                        { lbl: "Suave", path: "M2 12 C10 12 14 2 22 2" },
+                                                        { lbl: "Lineal", path: "M2 12 L22 2" },
+                                                        { lbl: "Pausa", path: "M2 12 H16 V2 H22" },
+                                                    ] : easing-ta := TouchArea {
+                                                        horizontal-stretch: 1;
+                                                        mouse-cursor: pointer;
+                                                        clicked => { root.set-easing(ei); }
+                                                        Rectangle {
+                                                            border-radius: max(0px, Theme.radius-control - 1px);
+                                                            background: root.easing-idx == ei ? Theme.accent-soft : (easing-ta.has-hover ? Theme.bg-hover : transparent);
+                                                            border-width: root.easing-idx == ei ? 1px : 0px;
+                                                            border-color: Theme.accent;
+                                                            VerticalLayout {
+                                                                padding-top: 3px;
+                                                                padding-bottom: 2px;
+                                                                spacing: 2px;
+                                                                alignment: center;
+                                                                Path {
+                                                                    width: 20px;
+                                                                    height: 11px;
+                                                                    x: (parent.width - self.width) / 2;
+                                                                    viewbox-width: 24;
+                                                                    viewbox-height: 14;
+                                                                    fill: transparent;
+                                                                    stroke: root.easing-idx == ei ? Theme.accent : (easing-ta.has-hover ? Theme.text-primary : Theme.text-secondary);
+                                                                    stroke-width: 1.7px;
+                                                                    stroke-line-cap: round;
+                                                                    stroke-line-join: round;
+                                                                    commands: ev.path;
+                                                                }
+                                                                Text {
+                                                                    text: ev.lbl;
+                                                                    color: root.easing-idx == ei ? Theme.accent : Theme.text-secondary;
+                                                                    font-size: 9px;
+                                                                    font-weight: root.easing-idx == ei ? 700 : 500;
+                                                                    horizontal-alignment: center;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1724,9 +1994,9 @@ export component MainWindow inherits Window {
 
                                 // Center Vector Media Transport (DEC-14)
                                 HorizontalLayout {
-                                    x: (parent.width - 280px) / 2 + 122px;
+                                    x: (parent.width - 260px) / 2 + 78px;
                                     y: 3px;
-                                    width: 280px;
+                                    width: 260px;
                                     height: 26px;
                                     spacing: 4px;
                                     alignment: center;
@@ -1753,11 +2023,11 @@ export component MainWindow inherits Window {
                                     StudioButton { width: 42px; compact: true; ghost: true; mono: true; label: root.speed-label; clicked => { root.cycle-speed(); } }
                                 }
 
-                                // Right Scope Switch (Hueso | Todo) + Keyframe Actions (Copy, Paste, Add, Impact, Delete)
+                                // Right Scope Switch (Hueso | Todo) + Keyframe Actions (Pack, Spread, Copy, Paste, Add, Impact, Delete)
                                 HorizontalLayout {
-                                    x: parent.width - 274px;
+                                    x: parent.width - 332px;
                                     y: 3px;
-                                    width: 266px;
+                                    width: 324px;
                                     height: 26px;
                                     spacing: 4px;
                                     alignment: end;
@@ -1816,11 +2086,13 @@ export component MainWindow inherits Window {
 
                                     Rectangle { width: 1px; height: 14px; y: 6px; background: Theme.divider; }
 
-                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; path-cmd: "M9 9 H20 V20 H9 Z M5 15 H4 A2 2 0 0 1 2 13 V4 A2 2 0 0 1 4 2 H13 A2 2 0 0 1 15 4 V5"; clicked => { root.copy-timeline-action(); } }
-                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; active: root.bone-clipboard-count > 0; path-cmd: "M16 4 H18 A2 2 0 0 1 20 6 V20 A2 2 0 0 1 18 22 H6 A2 2 0 0 1 4 20 V6 A2 2 0 0 1 6 4 H8 M8 2 H16 V6 H8 Z"; clicked => { root.paste-timeline-action(); } }
-                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; path-cmd: "M12 5 V19 M5 12 H19"; clicked => { root.add-keyframe-action(); } }
-                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; active: root.has-impact; path-cmd: "M13 2 L3 14 H12 L11 22 L21 10 H12 L13 2 Z"; clicked => { root.mark-impact-action(); } }
-                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; path-cmd: "M3 6 H21 M19 6 V20 A2 2 0 0 1 17 22 H7 A2 2 0 0 1 5 20 V6 M8 6 V4 A2 2 0 0 1 10 2 H14 A2 2 0 0 1 16 4 V6"; clicked => { root.delete-keyframe-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Juntar frames"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M12 5 V19 M3 12 H9 M6 9 L9 12 L6 15 M21 12 H15 M18 9 L15 12 L18 15"; clicked => { root.pack-keyframes-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Separar frames"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M12 5 V19 M9 12 H3 M6 9 L3 12 L6 15 M15 12 H21 M18 9 L21 12 L18 15"; clicked => { root.spread-keyframes-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Copiar · Ctrl+C"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M9 9 H20 V20 H9 Z M5 15 H4 A2 2 0 0 1 2 13 V4 A2 2 0 0 1 4 2 H13 A2 2 0 0 1 15 4 V5"; clicked => { root.copy-timeline-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; active: root.bone-clipboard-count > 0; tip: "Pegar · Ctrl+V"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M16 4 H18 A2 2 0 0 1 20 6 V20 A2 2 0 0 1 18 22 H6 A2 2 0 0 1 4 20 V6 A2 2 0 0 1 6 4 H8 M8 2 H16 V6 H8 Z"; clicked => { root.paste-timeline-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Añadir keyframe · K"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M12 5 V19 M5 12 H19"; clicked => { root.add-keyframe-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; active: root.has-impact; tip: "Marcar impacto"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M13 2 L3 14 H12 L11 22 L21 10 H12 L13 2 Z"; clicked => { root.mark-impact-action(); } }
+                                    IconActionBtn { width: 24px; height: 24px; icon-size: 13px; tip: "Borrar · Supr"; hover-changed(s, t, tx, ty) => { root.set-tip(s, t, tx, ty); } path-cmd: "M3 6 H21 M19 6 V20 A2 2 0 0 1 17 22 H7 A2 2 0 0 1 5 20 V6 M8 6 V4 A2 2 0 0 1 10 2 H14 A2 2 0 0 1 16 4 V6"; clicked => { root.delete-keyframe-action(); } }
                                 }
                             }
 
@@ -1845,7 +2117,7 @@ export component MainWindow inherits Window {
                                                 HorizontalLayout {
                                                     padding-left: 12px; padding-right: 10px; alignment: space-between;
                                                     Text {
-                                                        text: root.show-all-bones ? "Todos (8 huesos)" : "4 huesos principales";
+                                                        text: root.show-all-bones ? "Todos (10 huesos)" : "4 huesos principales";
                                                         color: Theme.text-secondary;
                                                         font-size: Theme.fs-meta;
                                                         font-weight: 500;
@@ -1918,14 +2190,48 @@ export component MainWindow inherits Window {
                                             image-rendering: pixelated;
                                         }
 
-                                        // Ruler Playhead Handle Cap
-                                        if root.playhead-visible : Rectangle {
-                                            x: root.playhead-frac * (parent.width - 20px) + 6px;
-                                            y: parent.height - 6px;
-                                            width: 9px;
-                                            height: 6px;
-                                            border-radius: min(2px, Theme.radius-control);
+                                        // Out-of-clip shaded tail + active clip end line
+                                        if root.clip-end-frac < 0.999 : Rectangle {
+                                            x: clamp(root.clip-end-frac, 0.0, 1.0) * max(1px, parent.width - 20px) + 10px;
+                                            y: 0px;
+                                            width: max(0px, parent.width - self.x);
+                                            height: parent.height;
+                                            background: Theme.bg-shell;
+                                            opacity: 0.45;
+                                        }
+                                        if root.clip-end-frac <= 1.002 : Rectangle {
+                                            x: clamp(root.clip-end-frac, 0.0, 1.0) * max(1px, parent.width - 20px) + 10px;
+                                            y: 2px;
+                                            width: 1.5px;
+                                            height: parent.height - 4px;
                                             background: Theme.accent;
+                                            opacity: 0.55;
+                                        }
+
+                                        // Impact Upward Gold Pin on Ruler bottom (distinct from Blue Playhead & clear of numbers)
+                                        if root.has-impact && root.impact-visible : Path {
+                                            x: root.impact-frac * (parent.width - 20px) + 10px - 4px;
+                                            y: parent.height - 6px;
+                                            width: 8px;
+                                            height: 6px;
+                                            viewbox-width: 8;
+                                            viewbox-height: 6;
+                                            fill: Theme.gold;
+                                            commands: "M4 0 L8 6 L0 6 Z";
+                                        }
+
+                                        // Bold Blue Ruler Playhead Shield Cap
+                                        if root.playhead-visible : Path {
+                                            x: root.playhead-frac * (parent.width - 20px) + 10px - 6.5px;
+                                            y: parent.height - 11px;
+                                            width: 13px;
+                                            height: 11px;
+                                            viewbox-width: 14;
+                                            viewbox-height: 12;
+                                            fill: Theme.accent;
+                                            stroke: #ffffff55;
+                                            stroke-width: 0.8px;
+                                            commands: "M1 1 H13 V7 L7 12 L1 7 Z";
                                         }
                                     }
                                 }
@@ -2064,13 +2370,30 @@ export component MainWindow inherits Window {
                                                 background: Theme.bg-guide;
                                             }
 
+                                            if root.clip-end-frac < 0.999 : Rectangle {
+                                                x: clamp(root.clip-end-frac, 0.0, 1.0) * max(1px, parent.width - 20px) + 10px;
+                                                y: 0px;
+                                                width: max(0px, parent.width - self.x);
+                                                height: parent.height;
+                                                background: Theme.bg-shell;
+                                                opacity: 0.45;
+                                            }
+                                            if root.clip-end-frac <= 1.002 : Rectangle {
+                                                x: clamp(root.clip-end-frac, 0.0, 1.0) * max(1px, parent.width - 20px) + 10px;
+                                                y: 0px;
+                                                width: 1.5px;
+                                                height: parent.height;
+                                                background: Theme.accent;
+                                                opacity: 0.35;
+                                            }
+
                                             if root.has-impact && root.impact-visible : Rectangle {
                                                 x: root.impact-frac * (parent.width - 20px) + 10px;
                                                 y: 2px;
-                                                width: 2px;
+                                                width: 1px;
                                                 height: parent.height - 4px;
                                                 background: Theme.gold;
-                                                opacity: 0.55;
+                                                opacity: 0.38;
                                             }
 
                                             if root.selected-range-track-idx >= 0 && root.selected-range-count > 1 : Rectangle {
@@ -2083,10 +2406,10 @@ export component MainWindow inherits Window {
                                             }
 
                                             for dm in root.timeline-diamonds : TouchArea {
-                                                x: dm.frac * (parent.width - 20px) + 10px - 7px;
-                                                y: 2px + dm.track_idx * 24px + 4px;
-                                                width: 14px;
-                                                height: 14px;
+                                                x: dm.frac * (parent.width - 20px) + 10px - 8px;
+                                                y: 2px + dm.track_idx * 24px + 3px;
+                                                width: 16px;
+                                                height: 16px;
                                                 mouse-cursor: ew-resize;
                                                 property <bool> dragging-dm: false;
                                                 property <float> press-x: 0;
@@ -2116,8 +2439,16 @@ export component MainWindow inherits Window {
                                                         self.dragging-dm = false;
                                                     }
                                                 }
+                                                if dm.is_selected : Rectangle {
+                                                    width: 16px;
+                                                    height: 16px;
+                                                    border-radius: 8px;
+                                                    background: Theme.accent-soft;
+                                                    border-width: 1px;
+                                                    border-color: Theme.accent;
+                                                }
                                                 Path {
-                                                    width: 11px; height: 11px; x: 1.5px; y: 1.5px; viewbox-width: 12; viewbox-height: 12;
+                                                    width: 12px; height: 12px; x: 2px; y: 2px; viewbox-width: 12; viewbox-height: 12;
                                                     fill: dm.is_selected ? #ffffff : (dm.is_impact ? Theme.gold : dm.dot_color);
                                                     stroke: Theme.bg-shell;
                                                     stroke-width: 1px;
@@ -2134,8 +2465,8 @@ export component MainWindow inherits Window {
                                                 background: Theme.accent;
                                             }
 
-                                            // Horizontal Pan Scrollbar when Timeline is zoomed (>1.0x)
-                                            if root.timeline-zoomed : Rectangle {
+                                            // Horizontal Pan Scrollbar when clip exceeds viewport width
+                                            if root.timeline-scrollable : Rectangle {
                                                 x: 10px;
                                                 y: parent.height - 5px;
                                                 width: max(1px, parent.width - 20px);
@@ -2187,9 +2518,9 @@ export component MainWindow inherits Window {
         // 0. POPOVER: TIMELINE BONE CONTEXT MENU (Right-click on Track or Diamond)
         if root.timeline-ctx-open : Rectangle {
             x: root.timeline-ctx-x;
-            y: root.height - 160px - 332px;
+            y: root.height - 160px - 442px;
             width: 272px;
-            height: 326px;
+            height: 436px;
             border-radius: Theme.radius-overlay;
             background: Theme.bg-popover;
             border-width: 1px;
@@ -2215,7 +2546,7 @@ export component MainWindow inherits Window {
                     { id: "copy_tr", lbl: "Copiar toda la pista del hueso", sc: "" },
                     { id: "paste", lbl: "Pegar en este hueso aquí", sc: "Ctrl+V" },
                     { id: "paste_mir", lbl: "Pegar espejado en este hueso", sc: "" },
-                    { id: "dup", lbl: "Duplicar frame del hueso (+0.10s)", sc: "" },
+                    { id: "dup", lbl: "Duplicar frame siguiente", sc: "" },
                 ] : TouchArea {
                     height: 26px; mouse-cursor: pointer;
                     clicked => {
@@ -2233,6 +2564,32 @@ export component MainWindow inherits Window {
                             padding-left: 10px; padding-right: 10px; alignment: space-between;
                             Text { text: mi.lbl; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                             if mi.sc != "" : Text { text: mi.sc; color: Theme.text-dim; font-family: Theme.font-mono; font-size: Theme.fs-meta; vertical-alignment: center; }
+                        }
+                    }
+                }
+                Hairline { }
+
+                for mt in [
+                    { id: "pack", lbl: "Juntar frames (compactar)", sc: "" },
+                    { id: "spread", lbl: "Separar frames (+1f)", sc: "" },
+                    { id: "nudge_l", lbl: "Mover timing -1 frame", sc: "Alt+←" },
+                    { id: "nudge_r", lbl: "Mover timing +1 frame", sc: "Alt+→" },
+                ] : TouchArea {
+                    height: 26px; mouse-cursor: pointer;
+                    clicked => {
+                        root.close-popovers();
+                        if (mt.id == "pack") { root.pack-keyframes-action(); }
+                        else if (mt.id == "spread") { root.spread-keyframes-action(); }
+                        else if (mt.id == "nudge_l") { root.nudge-keyframes-action(-1); }
+                        else if (mt.id == "nudge_r") { root.nudge-keyframes-action(1); }
+                    }
+                    Rectangle {
+                        border-radius: Theme.radius-control;
+                        background: parent.has-hover ? Theme.bg-hover : transparent;
+                        HorizontalLayout {
+                            padding-left: 10px; padding-right: 10px; alignment: space-between;
+                            Text { text: mt.lbl; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
+                            if mt.sc != "" : Text { text: mt.sc; color: Theme.text-dim; font-family: Theme.font-mono; font-size: Theme.fs-meta; vertical-alignment: center; }
                         }
                     }
                 }
@@ -2261,9 +2618,9 @@ export component MainWindow inherits Window {
                 Hairline { }
 
                 for mp in [
-                    { id: "copy_pose", lbl: "Copiar pose completa (8h)", sc: "Ctrl+Shift+C" },
+                    { id: "copy_pose", lbl: "Copiar pose completa (10h)", sc: "Ctrl+Shift+C" },
                     { id: "paste_pose", lbl: "Pegar pose completa aquí", sc: "Ctrl+Shift+V" },
-                    { id: "del_pose", lbl: "Borrar frame completo (8h)", sc: "Shift+Supr" },
+                    { id: "del_pose", lbl: "Borrar frame completo (10h)", sc: "Shift+Supr" },
                 ] : TouchArea {
                     height: 26px; mouse-cursor: pointer;
                     clicked => {
@@ -2290,7 +2647,7 @@ export component MainWindow inherits Window {
             x: 8px;
             y: 38px;
             width: 244px;
-            height: 296px;
+            height: 326px;
             border-radius: Theme.radius-overlay;
             background: Theme.bg-popover;
             border-width: 1px;
@@ -2304,6 +2661,7 @@ export component MainWindow inherits Window {
                 for item in [
                     { id: "new", lbl: "Nueva escena en blanco", sc: "" },
                     { id: "import", lbl: "Importar ítems (.png/.json)…", sc: "" },
+                    { id: "skin", lbl: "Cargar skin (.png)…", sc: "" },
                     { id: "demos", lbl: "Cargar presets demo", sc: "" },
                     { id: "search", lbl: "Búsqueda rápida…", sc: "Ctrl+K" },
                 ] : TouchArea {
@@ -2312,6 +2670,7 @@ export component MainWindow inherits Window {
                         root.close-popovers();
                         if (item.id == "new") { root.reset-blank-scene(); }
                         else if (item.id == "import") { root.import-custom-weapons(); }
+                        else if (item.id == "skin") { root.load-skin-action(); }
                         else if (item.id == "demos") { root.load-demo-presets(); }
                         else { root.open-palette(); }
                     }
@@ -2594,12 +2953,12 @@ export component MainWindow inherits Window {
             }
         }
 
-        // 5. POPOVER: VISTA ▾ (DEC-15: Solo Arma, Cebolla, Estela, Sombras, Entorno)
+        // 5. POPOVER: VISTA ▾ (DEC-15: Solo Arma, Arma Izquierda, Cebolla, Estela, Sombras, Entorno, Skin)
         if root.view-menu-open : Rectangle {
             x: (root.focus-mode ? parent.width : parent.width - 272px) - 246px;
             y: 84px;
             width: 234px;
-            height: 224px;
+            height: 368px;
             border-radius: Theme.radius-overlay;
             background: Theme.bg-popover;
             border-width: 1px;
@@ -2608,12 +2967,17 @@ export component MainWindow inherits Window {
             TouchArea { width: 100%; height: 100%; }
             VerticalLayout {
                 padding: 12px;
-                spacing: 10px;
+                spacing: 9px;
 
                 HorizontalLayout {
                     alignment: space-between;
                     Text { text: "Solo arma (ocultar rig)"; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
                     StudioSwitch { checked: root.solo-weapon; toggled => { root.toggle-solo-weapon(); } }
+                }
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text { text: "Arma izquierda (Dual)"; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
+                    StudioSwitch { checked: root.show-offhand-weapon; toggled(v) => { root.toggle-offhand-weapon(v); } }
                 }
                 HorizontalLayout {
                     alignment: space-between;
@@ -2640,6 +3004,32 @@ export component MainWindow inherits Window {
                             compact: true; horizontal-stretch: 1; label: bg;
                             active: root.bg-idx == bi; clicked => { root.set-bg-mode(bi); }
                         }
+                    }
+                }
+                Hairline { }
+                VerticalLayout {
+                    spacing: 6px;
+                    Text { text: root.skin-label; color: Theme.text-dim; font-size: Theme.fs-meta; overflow: elide; }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        StudioButton {
+                            compact: true; horizontal-stretch: 1; label: "Cargar skin (.png)";
+                            clicked => { root.close-popovers(); root.load-skin-action(); }
+                        }
+                        if root.has-custom-skin : StudioButton {
+                            compact: true; width: 52px; label: "Base";
+                            clicked => { root.reset-skin-action(); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "Brazos Slim (Alex)"; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
+                        StudioSwitch { checked: root.skin-slim; toggled(v) => { root.toggle-skin-slim(v); } }
+                    }
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "2ª capa de skin"; color: Theme.text-primary; font-size: Theme.fs-body; vertical-alignment: center; }
+                        StudioSwitch { checked: root.skin-outer-layer; toggled(v) => { root.toggle-skin-outer-layer(v); } }
                     }
                 }
             }
@@ -2918,6 +3308,28 @@ export component MainWindow inherits Window {
             }
         }
     } // end root-focus
+
+    // Floating Shortcut Tooltip Pill
+    if root.tip-text != "" : Rectangle {
+        x: clamp(root.tip-x - self.width / 2, 8px, parent.width - self.width - 8px);
+        y: root.tip-y > 54px ? root.tip-y - 28px : root.tip-y + 32px;
+        width: max(84px, tip-lbl.preferred-width + 16px);
+        height: 22px;
+        border-radius: 6px;
+        background: Theme.bg-toast;
+        border-width: 1px;
+        border-color: Theme.border-control;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #00000038;
+        tip-lbl := Text {
+            text: root.tip-text;
+            color: #ffffff;
+            font-size: Theme.fs-meta;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 
     // Subtle Non-Intrusive Toast Banner (bottom-right above Timeline edge)
     Rectangle {
