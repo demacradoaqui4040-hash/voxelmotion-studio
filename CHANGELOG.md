@@ -24,7 +24,10 @@ All notable changes to **VoxelMotion Studio** are documented in this file using 
 - **Modular Rust Architecture & Combat Ecosystem (`src/app_state.rs`, `src/camera.rs`, `src/ui_bridge.rs`, `src/modpack.rs`, `src/player_animator.rs`):**
   - Decoupled the monolithic entrypoint into dedicated state, camera, UI presenter, `DesignSpec`, modpack, and `playerAnimator` modules.
   - Added `playerAnimator` JSON importer (waist-leg composition and held-item hand-space conjugation), local modpack auto-discovery, 10-family weapon classifier, per-clip compatibility rules, curation status tracking, VFX timing events (`SlashTrail`, `ParrySpark`, `SonarRing`, `HitStop`, `ScreenShake`), and a training dummy mesh.
-- **Automated Verification & Benchmarks (`src/main.rs`, `src/ui_bridge.rs`):** Added `--bench-window`, `--bench-orbit-zoom`, `--capture-window` / `--capture-theme` / `--capture-tab` / `--capture-time`, and expanded unit test coverage to 18 release tests.
+- **Graduated Frame Ruler, Timeline Zoom & Frame Presets (`src/ui_bridge.rs`, `ui/app.slint`):**
+  - `1:1` physical-pixel rasterized graduated ruler (`ruler-notches-img`) and matching vertical frame grid lines (`lanes-grid-img`) displaying adaptive major and intermediate frame numbers (`0 1 2 … 10 11 12 13 14 15 …`) with zero dynamic `Text` overhead.
+  - Interactive Timeline zoom (`1.0x`–`8.0x` anchored at cursor via mouse wheel or `[- 1.0x +]` controls), horizontal panning (`Shift+Wheel`, middle-mouse drag, bottom scrollbar), and direct clip frame-count presets (`15f / 30f / 60f / 90f / 120f` + `±1f` stepper).
+- **Automated Verification & Benchmarks (`src/main.rs`, `src/ui_bridge.rs`):** Added `--bench-window`, `--bench-orbit-zoom`, `--capture-window` / `--capture-theme` / `--capture-tab` / `--capture-time`, and expanded unit test coverage to 20 release tests.
 
 ### Changed
 - **3D Stage & Rendering (`src/shaders.wgsl`, `src/renderer3d.rs`, `src/math3d.rs`):** Upgraded to 3-point studio lighting with ACES filmic tone mapping, soft grounded contact shadow disk, theme-calibrated floor grids (including a neutral mid-grey 3D floor for `Daylight Studio` so VFX trails stay readable), and a thinner low-opacity rotation gizmo ring.
@@ -37,6 +40,7 @@ All notable changes to **VoxelMotion Studio** are documented in this file using 
 - Replaced polling loops with event-driven single-shot timers (`TOAST_WAKE`, `SAVE_WAKE`, `THUMB_WAKE`), achieving `0.000%` idle CPU usage once settled.
 
 ### Fixed
+- **Strict 60 FPS Frame-Grid Keyframe Snapping (`src/model.rs`, `src/app_state.rs`, `src/ui_bridge.rs`):** Added `snap_clip_to_frame_grid` and `snap_time_to_frame` across clip loading, demo presets, duration/frame rescaling, scrubbing, dragging, pasting, and duplication (resolving dense collisions cleanly) so every keyframe diamond and impact marker locks dead-center onto integer vertical frame lines.
 - Selecting a timeline diamond now activates its bone lane (`track_idx`) cleanly alongside jumping to its timestamp.
 - Replaced OS-dependent Unicode chevron characters in `[Cámara ▾]` and `[Vista ▾]` HUD buttons with crisp SVG vector chevrons.
 - Deduplicated header clip counts in the Export modal and tightened vertical alignment in Settings and Inspector layouts.

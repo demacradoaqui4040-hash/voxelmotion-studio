@@ -94,6 +94,13 @@ export struct TimelineTrack {
     visible: bool,
 }
 
+export struct RulerTick {
+    frac: float,
+    label: string,
+    major: bool,
+    mid: bool,
+}
+
 export struct TimelineDiamond {
     kf_idx: int,
     track_idx: int,
@@ -223,6 +230,7 @@ export component MainWindow inherits Window {
     callback reset-bone-axis(int, int);
     callback toggle-loop(bool);
     callback change-duration(float);
+    callback set-clip-frames(int);
     callback set-easing(int);
     callback toggle-shadows(bool);
     callback toggle-onion(bool);
@@ -239,9 +247,16 @@ export component MainWindow inherits Window {
     in-out property <[TimelineTrack]> timeline-tracks: [];
     in-out property <[TimelineTrack]> all-bones-tracks: [];
     in-out property <[TimelineDiamond]> timeline-diamonds: [];
-    in-out property <[string]> ruler-ticks: ["0f", "10f", "20f", "30f", "40f", "50f", "60f"];
+    in-out property <image> ruler-notches-img;
+    in-out property <image> lanes-grid-img;
     in-out property <bool> show-all-bones: false;
     in-out property <bool> timeline-bone-scope: true;
+    in-out property <string> timeline-zoom-label: "1.0x";
+    in-out property <bool> timeline-zoomed: false;
+    in-out property <float> timeline-view-start: 0.0;
+    in-out property <float> timeline-view-span: 1.0;
+    in-out property <bool> playhead-visible: true;
+    in-out property <bool> impact-visible: true;
     in-out property <int> bone-clipboard-count: 0;
     in-out property <string> bone-clipboard-label: "";
     in-out property <int> selected-range-count: 0;
@@ -250,6 +265,7 @@ export component MainWindow inherits Window {
     in-out property <float> selected-range-end-frac: 0.0;
     in-out property <int> selected-kf-idx: 0;
     in-out property <bool> shift-held: false;
+    in-out property <bool> ctrl-held: false;
     in-out property <bool> timeline-ctx-open: false;
     in-out property <length> timeline-ctx-x: 40px;
     in-out property <int> timeline-ctx-bone-idx: 3;
@@ -257,6 +273,10 @@ export component MainWindow inherits Window {
     callback scrub-timeline(float);
     callback click-diamond(int, int, bool);
     callback drag-diamond(int, float);
+    callback zoom-timeline(float, float);
+    callback reset-timeline-zoom();
+    callback pan-timeline(float);
+    callback set-timeline-view-start(float);
     callback set-timeline-bone-scope(bool);
     callback copy-timeline-action();
     callback paste-timeline-action();
@@ -369,6 +389,7 @@ export component MainWindow inherits Window {
         init => { self.focus(); }
         key-pressed(ev) => {
             root.shift-held = ev.modifiers.shift || ev.text == Key.Shift;
+            root.ctrl-held = ev.modifiers.control || ev.text == Key.Control;
             if (ev.modifiers.control && (ev.text == "k" || ev.text == "K")) {
                 root.close-popovers();
                 if (root.palette-open) {
@@ -453,12 +474,18 @@ export component MainWindow inherits Window {
             } else {
                 root.shift-held = ev.modifiers.shift;
             }
+            if (ev.text == Key.Control) {
+                root.ctrl-held = false;
+            } else {
+                root.ctrl-held = ev.modifiers.control;
+            }
             root.studio-key-up(ev.text);
             accept
         }
         changed has-focus => {
             if (!self.has-focus) {
                 root.shift-held = false;
+                root.ctrl-held = false;
                 root.studio-key-up("*");
             }
         }
@@ -1471,17 +1498,28 @@ export component MainWindow inherits Window {
                                             }
                                             HorizontalLayout {
                                                 alignment: space-between;
-                                                Text { text: "Duración (s)"; color: Theme.text-secondary; font-size: Theme.fs-body; vertical-alignment: center; }
+                                                Text { text: "Duración"; color: Theme.text-secondary; font-size: Theme.fs-body; vertical-alignment: center; }
                                                 HorizontalLayout {
                                                     spacing: 4px;
-                                                    StudioButton { width: 24px; compact: true; ghost: true; label: "-"; clicked => { root.change-duration(root.duration-val - 0.05); } }
+                                                    StudioButton { width: 24px; compact: true; ghost: true; label: "-"; clicked => { root.set-clip-frames(root.total-frames - 1); } }
                                                     Rectangle {
-                                                        width: 48px; height: 24px; border-radius: Theme.radius-control;
+                                                        width: 82px; height: 24px; border-radius: Theme.radius-control;
                                                         background: Theme.wireframe-controls ? transparent : Theme.bg-input;
                                                         border-width: 1px; border-color: Theme.border-control;
-                                                        Text { text: root.duration-text; color: Theme.text-primary; font-family: Theme.font-mono; font-size: Theme.fs-mono; horizontal-alignment: center; vertical-alignment: center; }
+                                                        Text { text: root.total-frames + "f · " + root.duration-text + "s"; color: Theme.text-primary; font-family: Theme.font-mono; font-size: Theme.fs-meta; horizontal-alignment: center; vertical-alignment: center; }
                                                     }
-                                                    StudioButton { width: 24px; compact: true; ghost: true; label: "+"; clicked => { root.change-duration(root.duration-val + 0.05); } }
+                                                    StudioButton { width: 24px; compact: true; ghost: true; label: "+"; clicked => { root.set-clip-frames(root.total-frames + 1); } }
+                                                }
+                                            }
+                                            HorizontalLayout {
+                                                spacing: 3px;
+                                                for fc in [15, 30, 60, 90, 120] : StudioButton {
+                                                    compact: true;
+                                                    horizontal-stretch: 1;
+                                                    mono: true;
+                                                    label: fc + "f";
+                                                    active: root.total-frames == fc;
+                                                    clicked => { root.set-clip-frames(fc); }
                                                 }
                                             }
                                             HorizontalLayout {
@@ -1611,7 +1649,7 @@ export component MainWindow inherits Window {
                                 height: 32px;
                                 background: Theme.bg-ruler;
 
-                                // Left 244px Pistas + ● Auto
+                                // Left 244px Pistas + Zoom [- 1.0x +] + ● Auto
                                 HorizontalLayout {
                                     x: 0px;
                                     width: 244px;
@@ -1623,6 +1661,36 @@ export component MainWindow inherits Window {
                                     SectionLabel {
                                         text: Theme.mono-headers ? "PISTAS" : "Pistas";
                                         vertical-alignment: center;
+                                    }
+
+                                    HorizontalLayout {
+                                        y: 5px;
+                                        height: 22px;
+                                        spacing: 2px;
+                                        StudioButton {
+                                            width: 18px; height: 22px; compact: true; ghost: true; label: "-";
+                                            clicked => { root.zoom-timeline(-1.0, 0.5); }
+                                        }
+                                        zoom-reset-ta := TouchArea {
+                                            width: 34px; height: 22px; mouse-cursor: pointer;
+                                            clicked => { root.reset-timeline-zoom(); }
+                                            Rectangle {
+                                                border-radius: Theme.radius-control;
+                                                background: root.timeline-zoomed ? Theme.accent-soft : (zoom-reset-ta.has-hover ? Theme.bg-hover : transparent);
+                                                Text {
+                                                    text: root.timeline-zoom-label;
+                                                    color: root.timeline-zoomed ? Theme.accent-text : Theme.text-dim;
+                                                    font-family: Theme.font-mono;
+                                                    font-size: Theme.fs-meta;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                        StudioButton {
+                                            width: 18px; height: 22px; compact: true; ghost: true; label: "+";
+                                            clicked => { root.zoom-timeline(1.0, 0.5); }
+                                        }
                                     }
 
                                     auto-ta := TouchArea {
@@ -1758,9 +1826,9 @@ export component MainWindow inherits Window {
 
                             Hairline { }
 
-                            // Row 2 (22px): Left Bone Count Toggle ("4 huesos" / "Todos (8)") | Scrubbable Frame Ruler
+                            // Row 2 (24px): Left Bone Count Toggle ("4 huesos" / "Todos (8)") | Graduated Scrubbable Frame Ruler
                             Rectangle {
-                                height: 22px;
+                                height: 24px;
                                 background: Theme.bg-ruler;
 
                                 HorizontalLayout {
@@ -1784,7 +1852,7 @@ export component MainWindow inherits Window {
                                                         vertical-alignment: center;
                                                     }
                                                     VectorIcon {
-                                                        y: 5px; size: 12px; icon-color: Theme.text-dim;
+                                                        y: 6px; size: 12px; icon-color: Theme.text-dim;
                                                         commands: root.show-all-bones ? "M18 15 L12 9 L6 15" : "M6 9 L12 15 L18 9";
                                                     }
                                                 }
@@ -1798,26 +1866,66 @@ export component MainWindow inherits Window {
                                         horizontal-stretch: 1;
                                         mouse-cursor: pointer;
                                         property <bool> scrubbing: false;
+                                        property <bool> panning: false;
+                                        property <float> pan-last-x: 0;
                                         pointer-event(ev) => {
-                                            let f = clamp((self.mouse-x / 1px - 8.0) / max(1.0, (self.width / 1px) - 16.0), 0.0, 1.0);
+                                            let mx = self.mouse-x / 1px;
+                                            let lane_w = max(1.0, (self.width / 1px) - 20.0);
+                                            let f = clamp((mx - 10.0) / lane_w, 0.0, 1.0);
                                             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                                root-focus.focus();
                                                 self.scrubbing = true;
                                                 root.scrub-timeline(f);
+                                            } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.middle) {
+                                                root-focus.focus();
+                                                self.panning = true;
+                                                self.pan-last-x = mx;
                                             } else if (ev.kind == PointerEventKind.move && self.scrubbing) {
                                                 root.scrub-timeline(f);
+                                            } else if (ev.kind == PointerEventKind.move && self.panning) {
+                                                root.pan-timeline(-(mx - self.pan-last-x) / lane_w);
+                                                self.pan-last-x = mx;
                                             } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
                                                 self.scrubbing = false;
+                                                self.panning = false;
                                             }
                                         }
-                                        HorizontalLayout {
-                                            padding-left: 8px; padding-right: 8px; alignment: space-between;
-                                            for tick in root.ruler-ticks : Text {
-                                                text: tick;
-                                                color: Theme.text-dim;
-                                                font-family: Theme.font-mono;
-                                                font-size: Theme.fs-meta;
-                                                vertical-alignment: center;
+                                        scroll-event(ev) => {
+                                            let lane_w = max(1.0, (self.width / 1px) - 20.0);
+                                            let anchor = clamp((self.mouse-x / 1px - 10.0) / lane_w, 0.0, 1.0);
+                                            let dx = ev.delta-x / 1px;
+                                            let dy = ev.delta-y / 1px;
+                                            if (abs(dx) > 0.0 || root.shift-held) {
+                                                let d = abs(dx) > 0.0 ? -dx : -dy;
+                                                root.pan-timeline(d / 640.0);
+                                                return accept;
                                             }
+                                            if (abs(dy) > 0.0) {
+                                                root.zoom-timeline(dy, anchor);
+                                                return accept;
+                                            }
+                                            reject
+                                        }
+
+                                        // Single 1:1 physical-pixel ruler texture (notches + mono digits = zero dynamic Text overhead)
+                                        Image {
+                                            x: 10px;
+                                            y: 0px;
+                                            width: max(1px, parent.width - 20px);
+                                            height: parent.height;
+                                            source: root.ruler-notches-img;
+                                            image-fit: fill;
+                                            image-rendering: pixelated;
+                                        }
+
+                                        // Ruler Playhead Handle Cap
+                                        if root.playhead-visible : Rectangle {
+                                            x: root.playhead-frac * (parent.width - 20px) + 6px;
+                                            y: parent.height - 6px;
+                                            width: 9px;
+                                            height: 6px;
+                                            border-radius: min(2px, Theme.radius-control);
+                                            background: Theme.accent;
                                         }
                                     }
                                 }
@@ -1895,18 +2003,57 @@ export component MainWindow inherits Window {
                                             width: parent.width;
                                             height: parent.height;
                                             property <bool> dragging-playhead: false;
+                                            property <bool> panning: false;
+                                            property <float> pan-last-x: 0;
 
                                             pointer-event(ev) => {
-                                                let f = clamp((self.mouse-x / 1px - 8.0) / max(1.0, (self.width / 1px) - 16.0), 0.0, 1.0);
+                                                let mx = self.mouse-x / 1px;
+                                                let lane_w = max(1.0, (self.width / 1px) - 20.0);
+                                                let f = clamp((mx - 10.0) / lane_w, 0.0, 1.0);
                                                 if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                                                     root-focus.focus();
                                                     self.dragging-playhead = true;
                                                     root.scrub-timeline(f);
+                                                } else if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.middle) {
+                                                    root-focus.focus();
+                                                    self.panning = true;
+                                                    self.pan-last-x = mx;
                                                 } else if (ev.kind == PointerEventKind.move && self.dragging-playhead) {
                                                     root.scrub-timeline(f);
+                                                } else if (ev.kind == PointerEventKind.move && self.panning) {
+                                                    root.pan-timeline(-(mx - self.pan-last-x) / lane_w);
+                                                    self.pan-last-x = mx;
                                                 } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
                                                     self.dragging-playhead = false;
+                                                    self.panning = false;
                                                 }
+                                            }
+                                            scroll-event(ev) => {
+                                                let lane_w = max(1.0, (self.width / 1px) - 20.0);
+                                                let anchor = clamp((self.mouse-x / 1px - 10.0) / lane_w, 0.0, 1.0);
+                                                let dx = ev.delta-x / 1px;
+                                                let dy = ev.delta-y / 1px;
+                                                if (abs(dx) > 0.0 || root.shift-held) {
+                                                    let d = abs(dx) > 0.0 ? -dx : -dy;
+                                                    root.pan-timeline(d / 640.0);
+                                                    return accept;
+                                                }
+                                                if (abs(dy) > 0.0 && (!root.show-all-bones || root.ctrl-held)) {
+                                                    root.zoom-timeline(dy, anchor);
+                                                    return accept;
+                                                }
+                                                reject
+                                            }
+
+                                            // Vertical per-frame guide lines texture aligned 1:1 with Ruler notches
+                                            Image {
+                                                x: 10px;
+                                                y: 0px;
+                                                width: max(1px, parent.width - 20px);
+                                                height: parent.height;
+                                                source: root.lanes-grid-img;
+                                                image-fit: fill;
+                                                image-rendering: pixelated;
                                             }
 
                                             for tr[ti] in root.timeline-tracks : Rectangle {
@@ -1917,8 +2064,8 @@ export component MainWindow inherits Window {
                                                 background: Theme.bg-guide;
                                             }
 
-                                            if root.has-impact : Rectangle {
-                                                x: root.impact-frac * (parent.width - 16px) + 8px;
+                                            if root.has-impact && root.impact-visible : Rectangle {
+                                                x: root.impact-frac * (parent.width - 20px) + 10px;
                                                 y: 2px;
                                                 width: 2px;
                                                 height: parent.height - 4px;
@@ -1927,16 +2074,16 @@ export component MainWindow inherits Window {
                                             }
 
                                             if root.selected-range-track-idx >= 0 && root.selected-range-count > 1 : Rectangle {
-                                                x: root.selected-range-start-frac * (parent.width - 16px) + 6px;
+                                                x: root.selected-range-start-frac * (parent.width - 20px) + 8px;
                                                 y: 2px + root.selected-range-track-idx * 24px + 3px;
-                                                width: max(12px, (root.selected-range-end-frac - root.selected-range-start-frac) * (parent.width - 16px) + 4px);
+                                                width: max(12px, (root.selected-range-end-frac - root.selected-range-start-frac) * (parent.width - 20px) + 4px);
                                                 height: 16px;
                                                 border-radius: 3px;
                                                 background: Theme.accent-soft;
                                             }
 
                                             for dm in root.timeline-diamonds : TouchArea {
-                                                x: dm.frac * (parent.width - 16px) + 8px - 7px;
+                                                x: dm.frac * (parent.width - 20px) + 10px - 7px;
                                                 y: 2px + dm.track_idx * 24px + 4px;
                                                 width: 14px;
                                                 height: 14px;
@@ -1961,8 +2108,8 @@ export component MainWindow inherits Window {
                                                     } else if (ev.kind == PointerEventKind.move && self.dragging-dm) {
                                                         let abs_x = (self.x / 1px) + mx;
                                                         if (abs(abs_x - self.press-x) > 2.5) {
-                                                            let lane_w = max(1.0, (lanes-area.width / 1px) - 16.0);
-                                                            let new_f = clamp((abs_x - 8.0) / lane_w, 0.0, 1.0);
+                                                            let lane_w = max(1.0, (lanes-area.width / 1px) - 20.0);
+                                                            let new_f = clamp((abs_x - 10.0) / lane_w, 0.0, 1.0);
                                                             root.drag-diamond(dm.kf_idx, new_f);
                                                         }
                                                     } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
@@ -1978,21 +2125,46 @@ export component MainWindow inherits Window {
                                                 }
                                             }
 
-                                            // Accent Playhead + Numeric Cap
-                                            Rectangle {
-                                                x: root.playhead-frac * (parent.width - 16px) + 8px;
+                                            // Accent Playhead Line
+                                            if root.playhead-visible : Rectangle {
+                                                x: root.playhead-frac * (parent.width - 20px) + 10px;
                                                 y: 0px;
                                                 width: 1.5px;
                                                 height: parent.height;
                                                 background: Theme.accent;
                                             }
-                                            Rectangle {
-                                                x: root.playhead-frac * (parent.width - 16px) + 4.5px;
-                                                y: 0px;
-                                                width: 8px;
-                                                height: 5px;
-                                                border-radius: Theme.radius-control;
-                                                background: Theme.accent;
+
+                                            // Horizontal Pan Scrollbar when Timeline is zoomed (>1.0x)
+                                            if root.timeline-zoomed : Rectangle {
+                                                x: 10px;
+                                                y: parent.height - 5px;
+                                                width: max(1px, parent.width - 20px);
+                                                height: 4px;
+                                                border-radius: 2px;
+                                                background: Theme.bg-guide;
+                                                TouchArea {
+                                                    width: 100%; height: 100%; mouse-cursor: pointer;
+                                                    property <bool> dragging-sb: false;
+                                                    pointer-event(ev) => {
+                                                        let f = clamp((self.mouse-x / 1px) / max(1.0, self.width / 1px) - root.timeline-view-span * 0.5, 0.0, 1.0 - root.timeline-view-span);
+                                                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
+                                                            self.dragging-sb = true;
+                                                            root.set-timeline-view-start(f);
+                                                        } else if (ev.kind == PointerEventKind.move && self.dragging-sb) {
+                                                            root.set-timeline-view-start(f);
+                                                        } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                                                            self.dragging-sb = false;
+                                                        }
+                                                    }
+                                                }
+                                                Rectangle {
+                                                    x: root.timeline-view-start * parent.width;
+                                                    y: 0px;
+                                                    width: max(20px, root.timeline-view-span * parent.width);
+                                                    height: 4px;
+                                                    border-radius: 2px;
+                                                    background: Theme.accent;
+                                                }
                                             }
                                         }
                                     }

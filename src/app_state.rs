@@ -5,9 +5,10 @@ use crate::catalog;
 use crate::exporter::load_saved_project;
 use crate::math3d::{evaluate_rig_matrices, gizmo_axes_world, GizmoAxis, Mat4, Vec3};
 use crate::model::{
-    build_demo_presets, create_blank_clip, sample_clip_pose, AnimatorProject, BoneTransform,
-    ClipDef, ClipSource, CurationStatus, EasingMode, GalleryGroup, Keyframe, RigPose,
-    SpritePixels, ToolMode, VfxKind, WeaponCategory, WeaponRecord, ALL_BONES_MASK, BONE_COUNT,
+    build_demo_presets, create_blank_clip, sample_clip_pose, snap_clip_to_frame_grid,
+    snap_time_to_frame, AnimatorProject, BoneTransform, ClipDef, ClipSource, CurationStatus,
+    EasingMode, GalleryGroup, Keyframe, RigPose, SpritePixels, ToolMode, VfxKind, WeaponCategory,
+    WeaponRecord, ALL_BONES_MASK, BONE_COUNT,
 };
 use crate::modpack::{
     discover_servernuevo_root, load_all_combat_animations, load_curated_weapons, load_local_profile,
@@ -146,6 +147,8 @@ pub struct AppState {
     pub auto_keyframe: bool,
     pub show_all_bones: bool,
     pub timeline_bone_scope: bool,
+    pub timeline_zoom: f32,
+    pub timeline_view_start: f32,
     pub hidden_bones: [bool; BONE_COUNT],
     pub hovered_gizmo: GizmoAxis,
 
@@ -250,7 +253,7 @@ impl AppState {
             }
         }
 
-        let (weapons, curated_manifest_count, project) = if let Some(ref sr) = servernuevo_root {
+        let (weapons, curated_manifest_count, mut project) = if let Some(ref sr) = servernuevo_root {
             let (ws, raw_cnt) = load_curated_weapons(sr, &profile)
                 .unwrap_or_else(|_| {
                     let s = catalog::build_starter_weapons();
@@ -273,6 +276,9 @@ impl AppState {
             let raw_cnt = ws.len();
             (ws, raw_cnt, proj)
         };
+        for c in &mut project.clips {
+            snap_clip_to_frame_grid(c);
+        }
 
         let weapon_icons = weapons
             .iter()
@@ -331,6 +337,8 @@ impl AppState {
             auto_keyframe: true,
             show_all_bones: false,
             timeline_bone_scope: true,
+            timeline_zoom: 1.0,
+            timeline_view_start: 0.0,
             hidden_bones: [false; BONE_COUNT],
             hovered_gizmo: GizmoAxis::None,
             main_cam: ViewportCameraController::new_main(),
@@ -429,6 +437,54 @@ impl AppState {
         self.redo_stack.clear();
     }
 
+    pub fn timeline_view_span(&self) -> f32 {
+        (1.0 / self.timeline_zoom.clamp(1.0, 8.0)).clamp(0.125, 1.0)
+    }
+
+    pub fn set_timeline_zoom(&mut self, next_zoom: f32, anchor_screen_frac: f32) {
+        let old_span = self.timeline_view_span();
+        let anchor_s = anchor_screen_frac.clamp(0.0, 1.0);
+        let anchor_norm = (self.timeline_view_start + anchor_s * old_span).clamp(0.0, 1.0);
+        self.timeline_zoom = next_zoom.clamp(1.0, 8.0);
+        let new_span = self.timeline_view_span();
+        let max_start = (1.0 - new_span).max(0.0);
+        self.timeline_view_start = (anchor_norm - anchor_s * new_span).clamp(0.0, max_start);
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+    }
+
+    pub fn pan_timeline_view(&mut self, delta_screen_frac: f32) {
+        let span = self.timeline_view_span();
+        let max_start = (1.0 - span).max(0.0);
+        self.timeline_view_start =
+            (self.timeline_view_start + delta_screen_frac * span).clamp(0.0, max_start);
+        self.dirty.timeline_meta = true;
+        self.dirty.timeline_tracks = true;
+        self.dirty.timeline_diamonds = true;
+    }
+
+    pub fn ensure_playhead_in_view(&mut self) {
+        if self.timeline_zoom <= 1.01 {
+            return;
+        }
+        let dur = self.active_clip().duration.max(0.05);
+        let p = (self.current_time / dur).clamp(0.0, 1.0);
+        let span = self.timeline_view_span();
+        let max_start = (1.0 - span).max(0.0);
+        if p < self.timeline_view_start {
+            self.timeline_view_start = (p - span * 0.1).clamp(0.0, max_start);
+            self.dirty.timeline_meta = true;
+            self.dirty.timeline_tracks = true;
+            self.dirty.timeline_diamonds = true;
+        } else if p > self.timeline_view_start + span {
+            self.timeline_view_start = (p - span * 0.9).clamp(0.0, max_start);
+            self.dirty.timeline_meta = true;
+            self.dirty.timeline_tracks = true;
+            self.dirty.timeline_diamonds = true;
+        }
+    }
+
     pub fn clear_bone_selection(&mut self) {
         self.selected_range_bone = None;
         self.selected_range_times = None;
@@ -437,11 +493,13 @@ impl AppState {
     pub fn ensure_bone_kf_at(&mut self, time: f32, bone_idx: usize, easing: EasingMode) -> usize {
         let b_idx = bone_idx.min(BONE_COUNT - 1);
         let dur = self.active_clip().duration.max(0.05);
-        let target_t = (time.clamp(0.0, dur) * 1000.0).round() / 1000.0;
+        let frames = (dur * 60.0).round().max(1.0);
+        let tol = (0.45 * (dur / frames)).min(0.014);
+        let target_t = snap_time_to_frame(time, dur);
         let sampled_pose = sample_clip_pose(self.active_clip(), target_t);
         let clip = self.active_clip_mut();
         for (i, k) in clip.keyframes.iter_mut().enumerate() {
-            if (k.time - target_t).abs() < 0.016 {
+            if (k.time - target_t).abs() < tol {
                 if !k.has_bone(b_idx) {
                     k.bones.0[b_idx] = sampled_pose.0[b_idx];
                     k.set_bone(b_idx, true);
@@ -459,18 +517,21 @@ impl AppState {
         let idx = clip
             .keyframes
             .iter()
-            .position(|k| (k.time - target_t).abs() < 0.016)
+            .position(|k| (k.time - target_t).abs() < tol)
             .unwrap_or(0);
         self.dirty.timeline_diamonds = true;
         idx
     }
 
     pub fn ensure_kf_at_current(&mut self) -> usize {
-        let cur_t = self.current_time;
+        let dur = self.active_clip().duration.max(0.05);
+        let frames = (dur * 60.0).round().max(1.0);
+        let tol = (0.45 * (dur / frames)).min(0.014);
+        let cur_t = snap_time_to_frame(self.current_time, dur);
         let pose = sample_clip_pose(self.active_clip(), cur_t);
         let clip = self.active_clip_mut();
         for (i, k) in clip.keyframes.iter_mut().enumerate() {
-            if (k.time - cur_t).abs() < 0.016 {
+            if (k.time - cur_t).abs() < tol {
                 if k.bone_mask != ALL_BONES_MASK {
                     for bi in 0..BONE_COUNT {
                         if !k.has_bone(bi) {
@@ -483,7 +544,7 @@ impl AppState {
             }
         }
         clip.keyframes.push(Keyframe {
-            time: (cur_t * 1000.0).round() / 1000.0,
+            time: cur_t,
             easing: EasingMode::EaseOut,
             bones: pose,
             bone_mask: ALL_BONES_MASK,
@@ -492,7 +553,7 @@ impl AppState {
         let idx = clip
             .keyframes
             .iter()
-            .position(|k| (k.time - cur_t).abs() < 0.016)
+            .position(|k| (k.time - cur_t).abs() < tol)
             .unwrap_or(0);
         self.dirty.timeline_diamonds = true;
         idx
@@ -632,7 +693,7 @@ impl AppState {
         let mut first_dst: Option<f32> = None;
         let mut last_dst: Option<f32> = None;
         for f in &cb.frames {
-            let dst_t = ((base_t + f.dt).clamp(0.0, dur) * 60.0).round() / 60.0;
+            let dst_t = snap_time_to_frame(base_t + f.dt, dur);
             let mut tr = f.transform;
             if mirror_lr {
                 tr.pos[0] = -tr.pos[0];
@@ -724,8 +785,7 @@ impl AppState {
         self.push_undo();
         let dur = self.active_clip().duration.max(0.1);
         let tr = sample_clip_pose(self.active_clip(), self.current_time).0[b_idx];
-        let target_t = (self.current_time + 0.10).min(dur);
-        let rounded = (target_t * 60.0).round() / 60.0;
+        let rounded = snap_time_to_frame(self.current_time + 0.10, dur);
         let ki = self.ensure_bone_kf_at(rounded, b_idx, EasingMode::EaseOut);
         self.active_clip_mut().keyframes[ki].bones.0[b_idx] = tr;
         self.current_time = rounded;
@@ -1240,8 +1300,9 @@ impl AppState {
         let demos = build_demo_presets();
         let mut added = 0usize;
         let first_added_idx = self.project.clips.len();
-        for c in demos {
+        for mut c in demos {
             if !self.project.clips.iter().any(|existing| existing.id == c.id) {
+                snap_clip_to_frame_grid(&mut c);
                 self.project.clips.push(c);
                 added += 1;
             }

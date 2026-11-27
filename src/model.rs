@@ -743,6 +743,57 @@ pub fn create_blank_clip(seq: usize) -> ClipDef {
     }
 }
 
+pub fn snap_time_to_frame(time: f32, duration: f32) -> f32 {
+    let dur = duration.max(0.05);
+    let frames = (dur * 60.0).round().max(1.0);
+    let f_idx = ((time / dur).clamp(0.0, 1.0) * frames).round().clamp(0.0, frames);
+    (f_idx / frames) * dur
+}
+
+/// Align every keyframe and impact marker strictly onto exact 60 FPS integer frame lines,
+/// resolving dense keyframe collisions cleanly without stacking or losing bone data.
+pub fn snap_clip_to_frame_grid(clip: &mut ClipDef) {
+    let dur = clip.duration.max(0.05);
+    clip.duration = dur;
+    let frames = (dur * 60.0).round().max(1.0) as i32;
+    clip.keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
+    let raw_frames: Vec<i32> = clip
+        .keyframes
+        .iter()
+        .map(|k| ((k.time / dur).clamp(0.0, 1.0) * frames as f32).round() as i32)
+        .collect();
+
+    let mut snapped: Vec<(i32, Keyframe)> = Vec::with_capacity(clip.keyframes.len());
+    for (idx, mut k) in clip.keyframes.drain(..).enumerate() {
+        let f_raw = raw_frames[idx].clamp(0, frames);
+        if let Some((prev_f, prev_k)) = snapped.last_mut() {
+            if f_raw <= *prev_f {
+                let next_f = raw_frames.get(idx + 1).copied();
+                if *prev_f + 1 <= frames && next_f.map_or(true, |nf| *prev_f + 1 < nf) {
+                    let nf = *prev_f + 1;
+                    k.time = (nf as f32 / frames as f32) * dur;
+                    snapped.push((nf, k));
+                } else {
+                    for bi in 0..BONE_COUNT {
+                        if k.has_bone(bi) {
+                            prev_k.bones.0[bi] = k.bones.0[bi];
+                            prev_k.set_bone(bi, true);
+                        }
+                    }
+                    prev_k.easing = k.easing;
+                }
+                continue;
+            }
+        }
+        k.time = (f_raw as f32 / frames as f32) * dur;
+        snapped.push((f_raw, k));
+    }
+    clip.keyframes = snapped.into_iter().map(|(_, k)| k).collect();
+    if let Some(imp) = clip.impact_time {
+        clip.impact_time = Some(snap_time_to_frame(imp, dur));
+    }
+}
+
 pub fn prev_keyframe_time(clip: &ClipDef, t: f32) -> Option<f32> {
     clip.keyframes
         .iter()

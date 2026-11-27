@@ -339,7 +339,7 @@ fn main() {
     if let Some(t) = capture_time {
         let mut s = state.borrow_mut();
         let dur = s.active_clip().duration.max(0.05);
-        s.current_time = t.clamp(0.0, dur);
+        s.current_time = crate::model::snap_time_to_frame(t, dur);
         s.solo_weapon = false;
         s.playing = false;
         s.impact_flash = s
@@ -771,5 +771,55 @@ mod tests {
         assert!(cleared >= 3);
         assert!(s.active_clip().keyframes.iter().all(|k| !k.has_bone(3)));
         assert!((sample_clip_pose(s.active_clip(), 0.0).bone(4).rot[0] - (-60.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn ruler_ticks_adapt_to_chosen_frame_counts() {
+        let t29 = ui_bridge::build_ruler_ticks(29);
+        assert_eq!(t29.len(), 30);
+        let labels29: Vec<String> = t29.iter().filter(|t| !t.label.is_empty()).map(|t| t.label.to_string()).collect();
+        // 29f fits every intermediate number (0..=29) cleanly at 1160px
+        assert_eq!(labels29.len(), 30);
+        assert!(labels29.contains(&"10".into()) && labels29.contains(&"11".into()) && labels29.contains(&"12".into()));
+        assert!(labels29.contains(&"13".into()) && labels29.contains(&"14".into()) && labels29.contains(&"15".into()));
+        assert_eq!(labels29.last().map(String::as_str), Some("29"));
+        assert!(t29[5].major && !t29[1].major);
+
+        // 60f at 1.0x uses even labels (0, 2, ..., 60) with every frame ticked; 4x zoom around 9..24f pops in 10..15!
+        let t60 = ui_bridge::build_ruler_ticks(60);
+        assert_eq!(t60.len(), 61);
+        assert_eq!(t60[10].label.as_str(), "10");
+        assert!(t60[5].mid && !t60[5].major, "Mid notch expected on 5f");
+
+        let t60_zoom = ui_bridge::build_ruler_ticks_window(60, 0.15, 0.25, 1160.0);
+        let labels_z: Vec<String> = t60_zoom.iter().filter(|t| !t.label.is_empty()).map(|t| t.label.to_string()).collect();
+        for f in ["10", "11", "12", "13", "14", "15"] {
+            assert!(labels_z.contains(&f.to_string()), "Zoomed 60f ruler missing {f}: {labels_z:?}");
+        }
+    }
+
+    #[test]
+    fn keyframes_snap_strictly_onto_frame_grid_and_resolve_collisions() {
+        let mut clip = create_blank_clip(77);
+        clip.duration = 0.48; // 29 frames
+        clip.impact_time = Some(0.19);
+        clip.keyframes = vec![
+            crate::model::Keyframe { time: 0.0, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
+            crate::model::Keyframe { time: 0.09, easing: crate::model::EasingMode::Snap, bones: Default::default(), bone_mask: 1u8 << 3 },
+            crate::model::Keyframe { time: 0.19, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
+            crate::model::Keyframe { time: 0.342, easing: crate::model::EasingMode::EaseInOut, bones: Default::default(), bone_mask: 1u8 << 3 },
+            crate::model::Keyframe { time: 0.352, easing: crate::model::EasingMode::EaseOut, bones: Default::default(), bone_mask: 1u8 << 4 },
+            crate::model::Keyframe { time: 0.48, easing: crate::model::EasingMode::Linear, bones: Default::default(), bone_mask: crate::model::ALL_BONES_MASK },
+        ];
+        crate::model::snap_clip_to_frame_grid(&mut clip);
+        let dur = clip.duration;
+        let frames = (dur * 60.0).round();
+        for k in &clip.keyframes {
+            let f_pos = (k.time / dur) * frames;
+            assert!((f_pos - f_pos.round()).abs() < 1e-4, "Keyframe off-grid: time={} f_pos={f_pos}", k.time);
+        }
+        let f_imp = (clip.impact_time.unwrap() / dur) * frames;
+        assert!((f_imp - f_imp.round()).abs() < 1e-4);
+        assert!(clip.keyframes.windows(2).all(|w| w[1].time > w[0].time + 0.005));
     }
 }
